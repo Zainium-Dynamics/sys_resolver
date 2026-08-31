@@ -1,17 +1,13 @@
 [package]
 name = "sys_resolver"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Dynamic FHS-path resolution logic for ZainiumOS"
 license = "GPL-3.0-only"
 
 [lib]
 name = "sys_resolver"
-# "lib" (rlib) for the CLI binary + this crate's own tests. "cdylib" is the
-# real deployed artifact: an LD_PRELOAD shared object — no libc rebuild of
-# any kind (musl or glibc), see src/preload.rs. "staticlib" kept too, in
-# case some other future non-libc consumer wants the C ABI in src/ffi.rs
-# linked in directly instead.
+
 crate-type = ["lib", "staticlib", "cdylib"]
 path = "src/lib.rs"
 
