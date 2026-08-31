@@ -40,12 +40,12 @@ use std::path::Path;
 /// `path` must be a valid, NUL-terminated C string. `out_buf` must be
 /// valid for `out_buf_len` writable bytes (or `out_buf_len == 0`, in which
 /// case `out_buf` is never dereferenced).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_resolver_candidates(
     path: *const c_char,
     out_buf: *mut c_char,
     out_buf_len: usize,
-) -> i32 {
+) -> i32 { unsafe {
     if path.is_null() {
         return 0;
     }
@@ -73,7 +73,7 @@ pub unsafe extern "C" fn sys_resolver_candidates(
     }
     std::ptr::copy_nonoverlapping(blob.as_ptr(), out_buf as *mut u8, blob.len());
     cands.len() as i32
-}
+}}
 
 #[cfg(test)]
 mod tests {
@@ -82,10 +82,12 @@ mod tests {
 
     #[test]
     fn ffi_round_trip_matches_the_pure_rust_candidates() {
-        std::env::set_var(
-            crate::remap::ZAIROOT_ENV,
-            "/run/media/alizain/ZAINIUM_DRIVE/zairoot",
-        );
+        unsafe {
+            std::env::set_var(
+                crate::remap::ZAIROOT_ENV,
+                "/run/media/alizain/ZAINIUM_DRIVE/zairoot",
+            );
+        }
 
         let path = CString::new("/usr/bin/env").unwrap();
         let mut buf = vec![0u8; 4096];
@@ -120,10 +122,12 @@ mod tests {
 
     #[test]
     fn ffi_reports_buffer_too_small_instead_of_writing_garbage() {
-        std::env::set_var(
-            crate::remap::ZAIROOT_ENV,
-            "/run/media/alizain/ZAINIUM_DRIVE/zairoot",
-        );
+        unsafe {
+            std::env::set_var(
+                crate::remap::ZAIROOT_ENV,
+                "/run/media/alizain/ZAINIUM_DRIVE/zairoot",
+            );
+        }
         let path = CString::new("/usr/bin/env").unwrap();
         let mut buf = vec![0u8; 1]; // far too small
         let n = unsafe {
@@ -134,10 +138,12 @@ mod tests {
 
     #[test]
     fn ffi_returns_zero_for_out_of_scope_path() {
-        std::env::set_var(
-            crate::remap::ZAIROOT_ENV,
-            "/run/media/alizain/ZAINIUM_DRIVE/zairoot",
-        );
+        unsafe {
+            std::env::set_var(
+                crate::remap::ZAIROOT_ENV,
+                "/run/media/alizain/ZAINIUM_DRIVE/zairoot",
+            );
+        }
         let path = CString::new("/home/alizain/whatever").unwrap();
         let mut buf = vec![0u8; 4096];
         let n = unsafe {

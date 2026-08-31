@@ -50,7 +50,7 @@ fn roots() -> &'static Roots {
 /// Look up the real, underlying libc symbol once and cache the address —
 /// `RTLD_NEXT` means "whatever the next object in load order provides",
 /// i.e. the actual musl (or glibc) implementation, never ourselves again.
-unsafe fn dlsym_next(name: &[u8]) -> *mut libc::c_void {
+unsafe fn dlsym_next(name: &[u8]) -> *mut libc::c_void { unsafe {
     let p = libc::dlsym(libc::RTLD_NEXT, name.as_ptr() as *const c_char);
     if p.is_null() {
         // Nothing sane to do if libc itself doesn't have this symbol —
@@ -58,20 +58,22 @@ unsafe fn dlsym_next(name: &[u8]) -> *mut libc::c_void {
         libc::abort();
     }
     p
-}
+}}
 
+// Only ever expanded from inside an already-`unsafe {}` function body
+// (every call site below), so no inner `unsafe` blocks needed here.
 macro_rules! real_fn {
     ($cache:ident, $name:expr, $ty:ty) => {{
         static CELL: OnceLock<usize> = OnceLock::new();
-        let addr = *CELL.get_or_init(|| unsafe { dlsym_next($name) as usize });
-        unsafe { std::mem::transmute::<usize, $ty>(addr) }
+        let addr = *CELL.get_or_init(|| dlsym_next($name) as usize);
+        std::mem::transmute::<usize, $ty>(addr)
     }};
 }
 
 /// Build the ordered candidate paths for a raw C path, as CStrings ready
 /// to hand back to a real libc call. Empty if out of scope / not a valid
 /// UTF-8 path / malformed.
-unsafe fn candidate_cstrings(path: *const c_char) -> Vec<CString> {
+unsafe fn candidate_cstrings(path: *const c_char) -> Vec<CString> { unsafe {
     if path.is_null() {
         return Vec::new();
     }
@@ -82,7 +84,7 @@ unsafe fn candidate_cstrings(path: *const c_char) -> Vec<CString> {
         .into_iter()
         .filter_map(|p| CString::new(p.as_os_str().as_bytes()).ok())
         .collect()
-}
+}}
 
 // ---------------------------------------------------------------------
 // open / openat
@@ -91,8 +93,8 @@ unsafe fn candidate_cstrings(path: *const c_char) -> Vec<CString> {
 type OpenFn = unsafe extern "C" fn(*const c_char, c_int, libc::mode_t) -> c_int;
 type OpenatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, libc::mode_t) -> c_int;
 
-#[no_mangle]
-pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: libc::mode_t) -> c_int {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: libc::mode_t) -> c_int { unsafe {
     let real: OpenFn = real_fn!(cell, b"open\0", OpenFn);
     let rc = real(path, flags, mode);
     if rc >= 0 || *libc::__errno_location() != libc::ENOENT {
@@ -105,15 +107,15 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: libc::mod
         }
     }
     rc
-}
+}}
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn openat(
     dirfd: c_int,
     path: *const c_char,
     flags: c_int,
     mode: libc::mode_t,
-) -> c_int {
+) -> c_int { unsafe {
     let real: OpenatFn = real_fn!(cell, b"openat\0", OpenatFn);
     let rc = real(dirfd, path, flags, mode);
     // Only meaningful to resolve absolute paths (dirfd is irrelevant
@@ -128,7 +130,7 @@ pub unsafe extern "C" fn openat(
         }
     }
     rc
-}
+}}
 
 // ---------------------------------------------------------------------
 // access / faccessat
@@ -137,8 +139,8 @@ pub unsafe extern "C" fn openat(
 type AccessFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 type FaccessatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, c_int) -> c_int;
 
-#[no_mangle]
-pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int { unsafe {
     let real: AccessFn = real_fn!(cell, b"access\0", AccessFn);
     let rc = real(path, mode);
     if rc >= 0 || *libc::__errno_location() != libc::ENOENT {
@@ -151,15 +153,15 @@ pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
         }
     }
     rc
-}
+}}
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn faccessat(
     dirfd: c_int,
     path: *const c_char,
     mode: c_int,
     flag: c_int,
-) -> c_int {
+) -> c_int { unsafe {
     let real: FaccessatFn = real_fn!(cell, b"faccessat\0", FaccessatFn);
     let rc = real(dirfd, path, mode, flag);
     if rc >= 0 || *libc::__errno_location() != libc::ENOENT {
@@ -172,7 +174,7 @@ pub unsafe extern "C" fn faccessat(
         }
     }
     rc
-}
+}}
 
 // ---------------------------------------------------------------------
 // stat / lstat / fstatat
@@ -181,8 +183,8 @@ pub unsafe extern "C" fn faccessat(
 type StatFn = unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int;
 type FstatatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
 
-#[no_mangle]
-pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut libc::stat) -> c_int { unsafe {
     let real: StatFn = real_fn!(cell, b"stat\0", StatFn);
     let rc = real(path, buf);
     if rc >= 0 || *libc::__errno_location() != libc::ENOENT {
@@ -195,10 +197,10 @@ pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut libc::stat) -> c_in
         }
     }
     rc
-}
+}}
 
-#[no_mangle]
-pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut libc::stat) -> c_int { unsafe {
     let real: StatFn = real_fn!(cell, b"lstat\0", StatFn);
     let rc = real(path, buf);
     if rc >= 0 || *libc::__errno_location() != libc::ENOENT {
@@ -211,15 +213,15 @@ pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut libc::stat) -> c_i
         }
     }
     rc
-}
+}}
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstatat(
     dirfd: c_int,
     path: *const c_char,
     buf: *mut libc::stat,
     flag: c_int,
-) -> c_int {
+) -> c_int { unsafe {
     let real: FstatatFn = real_fn!(cell, b"fstatat\0", FstatatFn);
     let rc = real(dirfd, path, buf, flag);
     if rc >= 0 || *libc::__errno_location() != libc::ENOENT {
@@ -232,7 +234,7 @@ pub unsafe extern "C" fn fstatat(
         }
     }
     rc
-}
+}}
 
 // ---------------------------------------------------------------------
 // execve — the shebang-aware one
@@ -246,7 +248,7 @@ type ExecveFn =
 /// resolution logic recursing into itself) — `Some(true)` if it starts
 /// with `#!`, `Some(false)` if it opened fine but doesn't, `None` if it
 /// couldn't be opened/read at all.
-unsafe fn starts_with_shebang(real_open: OpenFn, path: &CStr) -> Option<bool> {
+unsafe fn starts_with_shebang(real_open: OpenFn, path: &CStr) -> Option<bool> { unsafe {
     let fd = real_open(path.as_ptr(), libc::O_RDONLY, 0);
     if fd < 0 {
         return None;
@@ -258,12 +260,12 @@ unsafe fn starts_with_shebang(real_open: OpenFn, path: &CStr) -> Option<bool> {
         return Some(false);
     }
     Some(&buf == b"#!")
-}
+}}
 
 /// Read a shebang line's full content (after the `#!`), via the real
 /// open/read — up to a generous fixed cap, matching the kernel's own
 /// `BINPRM_BUF_SIZE`-style bound instead of reading unboundedly.
-unsafe fn read_shebang_line(real_open: OpenFn, path: &CStr) -> Option<String> {
+unsafe fn read_shebang_line(real_open: OpenFn, path: &CStr) -> Option<String> { unsafe {
     let fd = real_open(path.as_ptr(), libc::O_RDONLY, 0);
     if fd < 0 {
         return None;
@@ -278,11 +280,11 @@ unsafe fn read_shebang_line(real_open: OpenFn, path: &CStr) -> Option<String> {
     let line_end = buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
     let line = &buf[2..line_end.max(2)]; // skip the leading "#!"
     std::str::from_utf8(line).ok().map(|s| s.trim().to_string())
-}
+}}
 
 /// Resolve one path (as given on a shebang line, or as the exec target
 /// itself) to a real, existing absolute path if it isn't one already.
-unsafe fn resolve_if_needed(real_open: OpenFn, path: &str) -> Option<CString> {
+unsafe fn resolve_if_needed(real_open: OpenFn, path: &str) -> Option<CString> { unsafe {
     let as_cstring = CString::new(path).ok()?;
     if real_exists(real_open, &as_cstring) {
         return Some(as_cstring);
@@ -291,9 +293,9 @@ unsafe fn resolve_if_needed(real_open: OpenFn, path: &str) -> Option<CString> {
         .into_iter()
         .filter_map(|p| CString::new(p.as_os_str().as_bytes()).ok())
         .find(|c| real_exists(real_open, c))
-}
+}}
 
-unsafe fn real_exists(real_open: OpenFn, path: &CStr) -> bool {
+unsafe fn real_exists(real_open: OpenFn, path: &CStr) -> bool { unsafe {
     let fd = real_open(path.as_ptr(), libc::O_RDONLY, 0);
     if fd >= 0 {
         libc::close(fd);
@@ -301,14 +303,14 @@ unsafe fn real_exists(real_open: OpenFn, path: &CStr) -> bool {
     } else {
         false
     }
-}
+}}
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn execve(
     path: *const c_char,
     argv: *const *const c_char,
     envp: *const *const c_char,
-) -> c_int {
+) -> c_int { unsafe {
     let real: ExecveFn = real_fn!(cell, b"execve\0", ExecveFn);
     let real_open: OpenFn = real_fn!(cell2, b"open\0", OpenFn);
 
@@ -374,4 +376,4 @@ pub unsafe extern "C" fn execve(
         return real(effective.as_ptr(), argv, envp);
     }
     real(path, argv, envp)
-}
+}}
