@@ -6,14 +6,15 @@ use std::path::{Component, Path, PathBuf};
 pub const ZAIROOT_ENV: &str = "ZAINIUM_ZAIROOT";
 
 /// Top-level prefixes this resolver ever touches; `/home` and `/tmp` are real, already-present, and excluded on purpose.
-const SCOPE_GUARD: &[&str] = &["bin", "sbin", "lib", "usr", "opt", "var", "etc"];
+const SCOPE_GUARD: &[&str] = &["bin", "sbin", "lib", "usr", "opt", "var", "etc", "boot"];
 
-/// The three real base roots, probed in this order.
+/// The four real base roots, probed in this order.
 #[derive(Debug, Clone)]
 pub struct Roots {
     pub syshub: PathBuf,
     pub musl_sysdir: PathBuf,
     pub union: PathBuf,
+    pub zaisys: PathBuf,
 }
 
 impl Roots {
@@ -23,6 +24,7 @@ impl Roots {
             syshub: overlayer.join("syshub"),
             musl_sysdir: overlayer.join("syshub/x86_64-zainium-linux-musl"),
             union: overlayer.join("zexlib/union"),
+            zaisys: overlayer.join("zaisys"),
         }
     }
 
@@ -30,8 +32,8 @@ impl Roots {
         Self::under(&system_root())
     }
 
-    fn probe_order(&self) -> [&Path; 3] {
-        [&self.syshub, &self.musl_sysdir, &self.union]
+    fn probe_order(&self) -> [&Path; 4] {
+        [&self.syshub, &self.musl_sysdir, &self.union, &self.zaisys]
     }
 }
 
@@ -56,7 +58,7 @@ pub fn in_scope(path: &Path) -> bool {
 }
 
 /// `/usr/bin/foo` -> `bin/foo`, `/lib64/x` -> `lib/x`, `/bin/foo` unchanged.
-/// `/lib/modules` -> `drivers/modules`, `/lib/firmware` -> `drivers/hardware/firmwares` (real location on this OS, not under `lib/`).
+/// `/lib/modules` -> `drivers/modules`, `/lib/firmware` -> `drivers/hardware/firmwares`, `/boot` -> `kernel` (all real locations on this OS, not under `lib/`/root).
 pub fn strip_legacy(path: &Path) -> Option<PathBuf> {
     let s = path.to_str()?.strip_prefix('/')?;
     let s = s
@@ -76,6 +78,10 @@ pub fn strip_legacy(path: &Path) -> Option<PathBuf> {
         format!("drivers/hardware/firmwares/{rest}")
     } else if s == "lib/firmware" {
         "drivers/hardware/firmwares".to_string()
+    } else if let Some(rest) = s.strip_prefix("boot/") {
+        format!("kernel/{rest}")
+    } else if s == "boot" {
+        "kernel".to_string()
     } else {
         s
     };
@@ -190,12 +196,13 @@ mod tests {
                 roots.syshub.join("bin/definitely-not-real"),
                 roots.musl_sysdir.join("bin/definitely-not-real"),
                 roots.union.join("bin/definitely-not-real"),
+                roots.zaisys.join("bin/definitely-not-real"),
             ]
         );
     }
 
     #[test]
-    fn strip_legacy_maps_modules_and_firmware_to_drivers() {
+    fn strip_legacy_maps_modules_firmware_and_boot() {
         assert_eq!(
             strip_legacy(Path::new("/lib/modules/6.1.0/foo.ko")),
             Some(PathBuf::from("drivers/modules/6.1.0/foo.ko"))
@@ -204,6 +211,10 @@ mod tests {
             strip_legacy(Path::new("/lib/firmware/some-device.bin")),
             Some(PathBuf::from("drivers/hardware/firmwares/some-device.bin"))
         );
+        assert_eq!(
+            strip_legacy(Path::new("/boot/some-kernel-image")),
+            Some(PathBuf::from("kernel/some-kernel-image"))
+        );
     }
 
     #[test]
@@ -211,6 +222,13 @@ mod tests {
         let roots = live_roots();
         let got = resolve(Path::new("/lib/firmware"), &roots).unwrap();
         assert_eq!(got, roots.syshub.join("drivers/hardware/firmwares"));
+    }
+
+    #[test]
+    fn resolves_boot_dir_under_zaisys_kernel() {
+        let roots = live_roots();
+        let got = resolve(Path::new("/boot"), &roots).unwrap();
+        assert_eq!(got, roots.zaisys.join("kernel"));
     }
 
     #[test]

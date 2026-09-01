@@ -1,5 +1,5 @@
-//! `LD_PRELOAD` interposition of open/openat/access/faccessat/stat/lstat/fstatat/execve — real function first via `dlsym(RTLD_NEXT,...)`, fallback to `remap::candidates` only on genuine ENOENT.
-//! Not covered: `execl`/`execlp`/`execle` (true C variadics, and musl's own exec* internals bypass LD_PRELOAD for these anyway).
+//! `LD_PRELOAD` interposition of open/openat/access/faccessat/stat/lstat/fstatat/execve/fopen/dlopen — real function first via `dlsym(RTLD_NEXT,...)`, fallback to `remap::candidates` only on genuine ENOENT.
+//! Not covered: `execl`/`execlp`/`execle` (true C variadics, and musl's own exec* internals bypass LD_PRELOAD for these anyway); `fopen64` (musl exposes it as a `#define fopen64 fopen` macro, not a distinct symbol).
 
 use crate::remap::{self, Roots};
 use libc::{c_char, c_int};
@@ -295,4 +295,40 @@ pub unsafe extern "C" fn execve(
         return real(effective.as_ptr(), argv, envp);
     }
     real(path, argv, envp)
+}}
+
+type FopenFn = unsafe extern "C" fn(*const c_char, *const c_char) -> *mut libc::FILE;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut libc::FILE { unsafe {
+    let real: FopenFn = real_fn!(cell, b"fopen\0", FopenFn);
+    let f = real(path, mode);
+    if !f.is_null() || *libc::__errno_location() != libc::ENOENT {
+        return f;
+    }
+    for cand in candidate_cstrings(path) {
+        let f2 = real(cand.as_ptr(), mode);
+        if !f2.is_null() {
+            return f2;
+        }
+    }
+    f
+}}
+
+type DlopenFn = unsafe extern "C" fn(*const c_char, c_int) -> *mut libc::c_void;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dlopen(path: *const c_char, flags: c_int) -> *mut libc::c_void { unsafe {
+    let real: DlopenFn = real_fn!(cell, b"dlopen\0", DlopenFn);
+    let handle = real(path, flags);
+    if !handle.is_null() || path.is_null() {
+        return handle;
+    }
+    for cand in candidate_cstrings(path) {
+        let h2 = real(cand.as_ptr(), flags);
+        if !h2.is_null() {
+            return h2;
+        }
+    }
+    handle
 }}

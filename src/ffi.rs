@@ -57,7 +57,7 @@ mod tests {
         let n = unsafe {
             sys_resolver_candidates(path.as_ptr(), buf.as_mut_ptr() as *mut c_char, buf.len())
         };
-        assert_eq!(n, 3, "expected 3 ordered candidates for /usr/bin/env");
+        assert_eq!(n, 4, "expected 4 ordered candidates for /usr/bin/env");
 
         let roots = Roots::from_env();
         let expected = candidates(Path::new("/usr/bin/env"), &roots);

@@ -88,6 +88,7 @@ pub fn full_audit(roots: &Roots) -> (Vec<AuditResult>, std::time::Duration) {
         audit_one_root("syshub", &roots.syshub, Some(roots.musl_sysdir.as_path()), roots),
         audit_one_root("MUSL_SYSDIR", &roots.musl_sysdir, None, roots),
         audit_one_root("zexlib/union", &roots.union, None, roots),
+        audit_one_root("zaisys", &roots.zaisys, None, roots),
     ];
     (results, start.elapsed())
 }
