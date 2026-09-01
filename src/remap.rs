@@ -1,52 +1,14 @@
-//! Dynamic FHS-path resolution — sys_resolver's own logic, independent of
-//! `zex` (no crate dependency on it; see the plan for why).
-//!
-//! Zainium OS has no FHS (`ZAI_NO_FHS=1`): there is no real `/usr`, `/bin`,
-//! `/sbin`, `/lib` on this system. Real files live under three roots:
-//!
-//!   - `<sysroot>/overlayer/syshub`                              (base OS)
-//!   - `<sysroot>/overlayer/syshub/x86_64-zainium-linux-musl`    (musl sysroot)
-//!   - `<sysroot>/overlayer/zexlib/union`                        (zex userland)
-//!
-//! `resolve()` takes a legacy FHS-shaped absolute path that failed to open
-//! and finds where it *really* lives, live against the real filesystem —
-//! no hardcoded per-category table, no snapshot of "what packages exist".
-//! It only ever reports paths that actually exist; it never invents one.
-//!
-//! `zex` itself is never affected by any of this: `zex` writes files
-//! straight to their real `/overlayer/...` location when it installs a
-//! package, so its own reads/writes never hit the `ENOENT` fallback this
-//! module exists for. This module exists purely for processes that don't
-//! know Zainium has no FHS in the first place (a plain `./configure &&
-//! make`, a script with an unmodified `#!/usr/bin/env python3`, a random
-//! downloaded binary expecting `/lib` or `/opt`).
+//! Dynamic FHS-path resolution against syshub / MUSL_SYSDIR / zexlib-union.
 
 use std::path::{Component, Path, PathBuf};
 
-/// Env var used to point every root at an alternate system root — the real
-/// system root in production is `/` (this OS *is* `/overlayer/...`), but
-/// during development/testing (this tool isn't running on ZainiumOS
-/// itself) it points at the real, live `zairoot` tree instead. Same
-/// convention `carve` already uses for `ZAINIUM_ZAIROOT`.
+/// Alternate system root for dev/test; production default is `/`.
 pub const ZAIROOT_ENV: &str = "ZAINIUM_ZAIROOT";
 
-/// Legacy FHS top-level prefixes this resolver is allowed to even look at.
-/// Not a destination table — it never says *where* something lives, only
-/// which prefixes are in scope, so an unrelated missing path (`/home/...`,
-/// `/proc/...`, `/dev/...`, ...) is left alone and fails exactly as it does
-/// today instead of being silently redirected by coincidence.
-///
-/// `/home` and `/tmp` are deliberately *not* here: both are real,
-/// already-present top-level directories on this system (confirmed on the
-/// live `zairoot` tree), so there's nothing to resolve — and `zexlib`'s own
-/// `union/tmp`, when it exists, is `zex`'s internal install-staging area
-/// (`local_install_*`, `update-dl/`, per `zex`'s own architecture docs),
-/// not a general-purpose scratch dir; redirecting arbitrary `/tmp` usage
-/// there would be a real bug, not a fix.
+/// Top-level prefixes this resolver ever touches; `/home` and `/tmp` are real, already-present, and excluded on purpose.
 const SCOPE_GUARD: &[&str] = &["bin", "sbin", "lib", "usr", "opt", "var", "etc"];
 
-/// The three real base roots, in the same priority order
-/// `/etc/profile`'s `PATH`/`LD_LIBRARY_PATH` already use.
+/// The three real base roots, probed in this order.
 #[derive(Debug, Clone)]
 pub struct Roots {
     pub syshub: PathBuf,
@@ -55,7 +17,6 @@ pub struct Roots {
 }
 
 impl Roots {
-    /// Build the three roots under a given system root.
     pub fn under(sysroot: &Path) -> Self {
         let overlayer = sysroot.join("overlayer");
         Roots {
@@ -65,7 +26,6 @@ impl Roots {
         }
     }
 
-    /// Roots as read from `ZAINIUM_ZAIROOT`, falling back to the real `/`.
     pub fn from_env() -> Self {
         Self::under(&system_root())
     }
@@ -75,7 +35,6 @@ impl Roots {
     }
 }
 
-/// The system root: `ZAINIUM_ZAIROOT` if set and non-empty, else `/`.
 pub fn system_root() -> PathBuf {
     match std::env::var_os(ZAIROOT_ENV) {
         Some(v) if !v.is_empty() => PathBuf::from(v),
@@ -83,7 +42,6 @@ pub fn system_root() -> PathBuf {
     }
 }
 
-/// Does `path` start with one of the [`SCOPE_GUARD`] prefixes?
 pub fn in_scope(path: &Path) -> bool {
     let mut comps = path.components();
     if !matches!(comps.next(), Some(Component::RootDir)) {
@@ -97,12 +55,7 @@ pub fn in_scope(path: &Path) -> bool {
     }
 }
 
-/// Strip the standard legacy segments down to a root-relative remainder.
-///
-/// `/usr/bin/foo` -> `bin/foo`, `/usr/local/lib/x` -> `lib/x`,
-/// `/lib64/foo` -> `lib/foo`, `/bin/foo` -> `bin/foo` (already
-/// root-relative, left as-is), `/usr/libexec/foo` -> `libexec/foo` (no
-/// `libexec`-specific rule needed — it just falls out of the `usr/` strip).
+/// `/usr/bin/foo` -> `bin/foo`, `/lib64/x` -> `lib/x`, `/bin/foo` unchanged.
 pub fn strip_legacy(path: &Path) -> Option<PathBuf> {
     let s = path.to_str()?.strip_prefix('/')?;
     let s = s
@@ -121,17 +74,7 @@ pub fn strip_legacy(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// The ordered candidate paths for `path` — no existence check, no I/O at
-/// all. Pure string/path construction only.
-///
-/// This is deliberately the boundary a C caller (a patched `open`/`access`/
-/// `stat`-family/`execve` in musl, and later glibc) calls into: the caller
-/// already knows how to make raw syscalls without depending on anything
-/// else, so it keeps doing the actual existence check/open itself, trying
-/// each returned candidate in order until one succeeds. Keeping this side
-/// I/O-free avoids any circular dependency on the libc that ends up
-/// calling it, and means the *exact same compiled logic* backs both the
-/// Rust CLI/tests here and every C call site — never reimplemented twice.
+/// Ordered candidate paths, no existence check — pure string construction.
 pub fn candidates(path: &Path, roots: &Roots) -> Vec<PathBuf> {
     if !path.is_absolute() || !in_scope(path) {
         return Vec::new();
@@ -146,11 +89,7 @@ pub fn candidates(path: &Path, roots: &Roots) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Resolve a legacy FHS-shaped absolute path to where it really lives on
-/// this ZainiumOS system, if anywhere.
-///
-/// Read-only: only ever checks whether real files exist, never creates,
-/// moves, or modifies anything, and never invents a path that isn't real.
+/// Resolve a legacy FHS-shaped path to where it really lives, if anywhere.
 pub fn resolve(path: &Path, roots: &Roots) -> Option<PathBuf> {
     candidates(path, roots).into_iter().find(|c| c.exists())
 }
@@ -159,8 +98,6 @@ pub fn resolve(path: &Path, roots: &Roots) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// Roots pointed at the real, live zairoot tree on this drive — no
-    /// mocking, these are real on-disk paths.
     fn live_roots() -> Roots {
         Roots::under(Path::new("/run/media/alizain/ZAINIUM_DRIVE/zairoot"))
     }
@@ -170,51 +107,31 @@ mod tests {
         let got = resolve(Path::new("/usr/bin/env"), &live_roots()).unwrap();
         assert_eq!(
             got,
-            Path::new(
-                "/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/syshub/bin/env"
-            )
+            Path::new("/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/syshub/bin/env")
         );
     }
 
     #[test]
     fn resolves_bare_bin_path_without_usr_prefix() {
-        // `/bin/env` (no `/usr` prefix at all) must resolve identically.
         let got = resolve(Path::new("/bin/env"), &live_roots()).unwrap();
         assert_eq!(
             got,
-            Path::new(
-                "/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/syshub/bin/env"
-            )
+            Path::new("/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/syshub/bin/env")
         );
     }
 
     #[test]
     fn resolves_header_that_only_exists_under_zexlib_union() {
-        // Proves the *dynamic* discovery case: dav1d's headers live only
-        // under zexlib/union/include — no static per-category table would
-        // have had to special-case this package, and none is needed here
-        // either, since this is a live filesystem check, not a lookup
-        // against a fixed list.
-        let got = resolve(
-            Path::new("/usr/include/dav1d/dav1d.h"),
-            &live_roots(),
-        )
-        .unwrap();
+        let got = resolve(Path::new("/usr/include/dav1d/dav1d.h"), &live_roots()).unwrap();
         assert_eq!(
             got,
-            Path::new(
-                "/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/zexlib/union/include/dav1d/dav1d.h"
-            )
+            Path::new("/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/zexlib/union/include/dav1d/dav1d.h")
         );
     }
 
     #[test]
     fn scope_guard_refuses_unrelated_prefixes() {
         let roots = live_roots();
-        // /home and /tmp are real, already-present top-level dirs on this
-        // system — nothing to resolve, and deliberately excluded (see
-        // SCOPE_GUARD's doc comment) rather than just "not implemented
-        // yet".
         for p in ["/home/alizain/whatever", "/proc/self", "/tmp/x", "/root/x"] {
             assert_eq!(resolve(Path::new(p), &roots), None, "should refuse {p}");
         }
@@ -222,13 +139,8 @@ mod tests {
 
     #[test]
     fn resolves_var_and_etc_under_syshub() {
-        // Both confirmed real on the live tree — /var and /etc are in
-        // scope alongside bin/sbin/lib/usr/opt.
         let roots = live_roots();
-        assert_eq!(
-            resolve(Path::new("/var"), &roots),
-            Some(roots.syshub.join("var"))
-        );
+        assert_eq!(resolve(Path::new("/var"), &roots), Some(roots.syshub.join("var")));
         assert_eq!(
             resolve(Path::new("/etc/passwd"), &roots),
             Some(roots.syshub.join("etc/passwd"))
@@ -258,10 +170,6 @@ mod tests {
 
     #[test]
     fn candidates_are_pure_and_ordered_no_io() {
-        // Pure string construction — must return the 3 ordered candidates
-        // even for a path that doesn't exist anywhere, since it does no
-        // existence checking at all (that's the caller's job in the FFI
-        // boundary this function exists for).
         let roots = live_roots();
         let got = candidates(Path::new("/usr/bin/definitely-not-real"), &roots);
         assert_eq!(
@@ -276,7 +184,6 @@ mod tests {
 
     #[test]
     fn strip_legacy_leaves_non_usr_subdirs_alone() {
-        // /usr/libexec/foo -> libexec/foo, no special-casing required.
         assert_eq!(
             strip_legacy(Path::new("/usr/libexec/foo")),
             Some(PathBuf::from("libexec/foo"))

@@ -1,39 +1,5 @@
-//! `LD_PRELOAD` symbol interposition — the actual deployed mechanism.
-//!
-//! No libc rebuild, musl or glibc: `LD_PRELOAD` is a plain environment
-//! variable this musl fork already honors (confirmed directly from its
-//! source, `ldso/dynlink.c`: `getenv("LD_PRELOAD")`). `/etc/ld.so.preload`
-//! (a *file*-based, always-on preload list) is a glibc-only mechanism —
-//! grepped this musl's `ldso/dynlink.c` for it and it isn't there, so
-//! writing to that file would silently do nothing here. The zero-manual-
-//! export delivery this project needs is instead: export `LD_PRELOAD=` in
-//! `/etc/environment` (already sourced for every login-shell-descended
-//! process, same as `PATH`/`CC` already are there) — no rebuild, just a
-//! config line, and it's the same mechanism for a musl-linked or a future
-//! glibc-linked process, so there's no "do it twice" problem at all.
-//!
-//! Each exported function here: try the real, underlying libc function
-//! first (via `dlsym(RTLD_NEXT, ...)`, so this never depends on which
-//! libc — musl today, glibc later — actually implements it). Only on a
-//! genuine `ENOENT`, and only for an in-scope path, fall back to
-//! [`crate::remap::candidates`] and retry each candidate with that same
-//! real function, in order, until one succeeds. The common case (path
-//! already resolves) costs nothing extra beyond the one real call.
-//!
-//! **Known, deliberate scope limit:** only `open`, `openat`, `access`,
-//! `faccessat`, `stat`, `lstat`, `fstatat`, and `execve` are interposed.
-//! `execl`/`execlp`/`execle` (true C variadics — an unbounded `...`
-//! argument list) cannot be implemented as a matching-ABI function on
-//! stable Rust at all (that needs the nightly-only `c_variadic` feature),
-//! and musl's own `execvp`/`execl*` call `execve` as a *local* call inside
-//! its own compiled object, which bypasses `LD_PRELOAD` interposition
-//! entirely (interposition only catches calls that cross the dynamic
-//! symbol table, not a library's calls to its own already-resolved
-//! internal symbols) — so code that reaches an absolute FHS path only via
-//! `execvp`/`execl*` is not covered by this preload library. Everything
-//! that calls `execve` directly (confirmed: musl's own `execvp` does, for
-//! any name already containing a `/`, which is exactly the hardcoded-
-//! absolute-path case this project exists for) is unaffected by that gap.
+//! `LD_PRELOAD` interposition of open/openat/access/faccessat/stat/lstat/fstatat/execve — real function first via `dlsym(RTLD_NEXT,...)`, fallback to `remap::candidates` only on genuine ENOENT.
+//! Not covered: `execl`/`execlp`/`execle` (true C variadics, and musl's own exec* internals bypass LD_PRELOAD for these anyway).
 
 use crate::remap::{self, Roots};
 use libc::{c_char, c_int};
@@ -47,21 +13,14 @@ fn roots() -> &'static Roots {
     ROOTS.get_or_init(Roots::from_env)
 }
 
-/// Look up the real, underlying libc symbol once and cache the address —
-/// `RTLD_NEXT` means "whatever the next object in load order provides",
-/// i.e. the actual musl (or glibc) implementation, never ourselves again.
 unsafe fn dlsym_next(name: &[u8]) -> *mut libc::c_void { unsafe {
     let p = libc::dlsym(libc::RTLD_NEXT, name.as_ptr() as *const c_char);
     if p.is_null() {
-        // Nothing sane to do if libc itself doesn't have this symbol —
-        // abort rather than dereference a null function pointer later.
         libc::abort();
     }
     p
 }}
 
-// Only ever expanded from inside an already-`unsafe {}` function body
-// (every call site below), so no inner `unsafe` blocks needed here.
 macro_rules! real_fn {
     ($cache:ident, $name:expr, $ty:ty) => {{
         static CELL: OnceLock<usize> = OnceLock::new();
@@ -70,9 +29,6 @@ macro_rules! real_fn {
     }};
 }
 
-/// Build the ordered candidate paths for a raw C path, as CStrings ready
-/// to hand back to a real libc call. Empty if out of scope / not a valid
-/// UTF-8 path / malformed.
 unsafe fn candidate_cstrings(path: *const c_char) -> Vec<CString> { unsafe {
     if path.is_null() {
         return Vec::new();
@@ -85,10 +41,6 @@ unsafe fn candidate_cstrings(path: *const c_char) -> Vec<CString> { unsafe {
         .filter_map(|p| CString::new(p.as_os_str().as_bytes()).ok())
         .collect()
 }}
-
-// ---------------------------------------------------------------------
-// open / openat
-// ---------------------------------------------------------------------
 
 type OpenFn = unsafe extern "C" fn(*const c_char, c_int, libc::mode_t) -> c_int;
 type OpenatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, libc::mode_t) -> c_int;
@@ -118,8 +70,6 @@ pub unsafe extern "C" fn openat(
 ) -> c_int { unsafe {
     let real: OpenatFn = real_fn!(cell, b"openat\0", OpenatFn);
     let rc = real(dirfd, path, flags, mode);
-    // Only meaningful to resolve absolute paths (dirfd is irrelevant
-    // then) — relative lookups are left completely alone.
     if rc >= 0 || *libc::__errno_location() != libc::ENOENT {
         return rc;
     }
@@ -131,10 +81,6 @@ pub unsafe extern "C" fn openat(
     }
     rc
 }}
-
-// ---------------------------------------------------------------------
-// access / faccessat
-// ---------------------------------------------------------------------
 
 type AccessFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 type FaccessatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, c_int) -> c_int;
@@ -175,10 +121,6 @@ pub unsafe extern "C" fn faccessat(
     }
     rc
 }}
-
-// ---------------------------------------------------------------------
-// stat / lstat / fstatat
-// ---------------------------------------------------------------------
 
 type StatFn = unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int;
 type FstatatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
@@ -236,18 +178,10 @@ pub unsafe extern "C" fn fstatat(
     rc
 }}
 
-// ---------------------------------------------------------------------
-// execve — the shebang-aware one
-// ---------------------------------------------------------------------
-
 type ExecveFn =
     unsafe extern "C" fn(*const c_char, *const *const c_char, *const *const c_char) -> c_int;
 
-/// Peek a real file's first two bytes via the *real* open/read (never our
-/// own interposed `open`, to keep this a plain, direct read with no
-/// resolution logic recursing into itself) — `Some(true)` if it starts
-/// with `#!`, `Some(false)` if it opened fine but doesn't, `None` if it
-/// couldn't be opened/read at all.
+/// `Some(true)` if `path` starts with `#!`, via the real open/read (never our own `open`).
 unsafe fn starts_with_shebang(real_open: OpenFn, path: &CStr) -> Option<bool> { unsafe {
     let fd = real_open(path.as_ptr(), libc::O_RDONLY, 0);
     if fd < 0 {
@@ -262,9 +196,6 @@ unsafe fn starts_with_shebang(real_open: OpenFn, path: &CStr) -> Option<bool> { 
     Some(&buf == b"#!")
 }}
 
-/// Read a shebang line's full content (after the `#!`), via the real
-/// open/read — up to a generous fixed cap, matching the kernel's own
-/// `BINPRM_BUF_SIZE`-style bound instead of reading unboundedly.
 unsafe fn read_shebang_line(real_open: OpenFn, path: &CStr) -> Option<String> { unsafe {
     let fd = real_open(path.as_ptr(), libc::O_RDONLY, 0);
     if fd < 0 {
@@ -278,12 +209,10 @@ unsafe fn read_shebang_line(real_open: OpenFn, path: &CStr) -> Option<String> { 
     }
     let n = n as usize;
     let line_end = buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
-    let line = &buf[2..line_end.max(2)]; // skip the leading "#!"
+    let line = &buf[2..line_end.max(2)];
     std::str::from_utf8(line).ok().map(|s| s.trim().to_string())
 }}
 
-/// Resolve one path (as given on a shebang line, or as the exec target
-/// itself) to a real, existing absolute path if it isn't one already.
 unsafe fn resolve_if_needed(real_open: OpenFn, path: &str) -> Option<CString> { unsafe {
     let as_cstring = CString::new(path).ok()?;
     if real_exists(real_open, &as_cstring) {
@@ -321,34 +250,24 @@ pub unsafe extern "C" fn execve(
         return real(path, argv, envp);
     };
 
-    // Find where the exec target actually lives (itself, or a resolved
-    // candidate if the given path doesn't exist).
     let effective = if real_exists(real_open, CStr::from_ptr(path)) {
         CString::new(path_str).ok()
     } else {
         resolve_if_needed(real_open, path_str)
     };
     let Some(effective) = effective else {
-        // Nothing real anywhere — genuine ENOENT, unchanged from today.
         return real(path, argv, envp);
     };
 
     if starts_with_shebang(real_open, &effective) == Some(true) {
         if let Some(line) = read_shebang_line(real_open, &effective) {
-            // Standard shebang grammar: interpreter, then at most one
-            // optional argument, split on the first run of whitespace.
             let mut parts = line.splitn(2, char::is_whitespace);
             let interp = parts.next().unwrap_or("").trim();
             let interp_arg = parts.next().map(|s| s.trim().to_string());
             if !interp.is_empty() {
                 if let Some(resolved_interp) = resolve_if_needed(real_open, interp) {
-                    // argv[0] = interpreter, [optional arg], original
-                    // script path exactly as the caller passed it, then
-                    // the caller's original argv[1..] — same convention
-                    // the kernel's own binfmt_script uses.
                     let orig_argv0 = CString::new(path_str).unwrap();
-                    let mut new_argv: Vec<*const c_char> =
-                        vec![resolved_interp.as_ptr()];
+                    let mut new_argv: Vec<*const c_char> = vec![resolved_interp.as_ptr()];
                     let interp_arg_c = interp_arg.and_then(|a| CString::new(a).ok());
                     if let Some(a) = &interp_arg_c {
                         new_argv.push(a.as_ptr());

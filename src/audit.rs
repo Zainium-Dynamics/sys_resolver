@@ -1,11 +1,4 @@
 //! Full-tree reachability audit — `doctor`'s real work.
-//!
-//! Walks *every* real file under each root (tens of thousands of files —
-//! this is the actual, currently-installed set of real packages on the
-//! system, not a sample) and checks that a plain `/usr/<remainder>`-shaped
-//! legacy alias reaches it through [`crate::remap::resolve`]. That alias
-//! shape is exactly what any ordinary FHS-authored package (the "100+
-//! FHS-based tools" this resolver exists for) already hardcodes.
 
 use crate::remap::{self, Roots};
 use std::path::{Path, PathBuf};
@@ -24,20 +17,12 @@ pub struct Miss {
 }
 
 pub enum MissReason {
-    /// The real entry itself is a dangling symlink — no alias could ever
-    /// reach it, since there's nothing at the end of it to reach. Not a
-    /// resolver bug; a pre-existing issue in the installed tree.
+    /// Not a resolver bug — the source itself is a dangling symlink.
     SourceIsDanglingSymlink,
-    /// The alias genuinely doesn't resolve to anything, even though the
-    /// real file exists. A real resolver gap.
     NoAliasResolved,
 }
 
-/// Recursively collect every file/symlink under `root`, as paths relative
-/// to `root`. Does not follow symlinked directories (avoids cycles) and
-/// skips `exclude` (an absolute path) entirely, so callers can audit
-/// `syshub` and its nested `MUSL_SYSDIR` as two separate, non-overlapping
-/// roots.
+/// Recursively collect every file/symlink under `root`, relative to it; skips `exclude`.
 fn walk_relative(root: &Path, exclude: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -55,11 +40,8 @@ fn walk_relative(root: &Path, exclude: Option<&Path>) -> Vec<PathBuf> {
             };
             if meta.is_dir() {
                 stack.push(path);
-            } else {
-                // Regular file or symlink (dangling or not) — a leaf.
-                if let Ok(rel) = path.strip_prefix(root) {
-                    out.push(rel.to_path_buf());
-                }
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_path_buf());
             }
         }
     }
@@ -100,13 +82,9 @@ fn audit_one_root(
     }
 }
 
-/// Audit all three roots. Returns one [`AuditResult`] per root plus the
-/// total wall time taken, so callers can report it stayed fast.
 pub fn full_audit(roots: &Roots) -> (Vec<AuditResult>, std::time::Duration) {
     let start = Instant::now();
     let results = vec![
-        // syshub, excluding the nested MUSL_SYSDIR subtree so it's only
-        // counted once, under its own root below.
         audit_one_root("syshub", &roots.syshub, Some(roots.musl_sysdir.as_path()), roots),
         audit_one_root("MUSL_SYSDIR", &roots.musl_sysdir, None, roots),
         audit_one_root("zexlib/union", &roots.union, None, roots),
@@ -122,12 +100,6 @@ mod tests {
         Roots::under(Path::new("/run/media/alizain/ZAINIUM_DRIVE/zairoot"))
     }
 
-    /// The real, exhaustive test: every real file currently installed
-    /// across all three roots — tens of thousands of files, standing in
-    /// for "100+ real FHS-authored packages" already unpacked onto this
-    /// system — must be reachable through a `/usr/<remainder>`-shaped
-    /// alias, unless it's a pre-existing dangling symlink (a real,
-    /// separate issue in the tree, not something any resolver can fix).
     #[test]
     fn every_real_file_is_reachable_or_a_known_dangling_symlink() {
         let roots = live_roots();
@@ -148,27 +120,16 @@ mod tests {
             }
         }
 
-        // Sanity: this must actually have walked a large, real tree —
-        // fails loudly if the zairoot fixture path ever moves/vanishes,
-        // instead of silently "passing" over zero files.
         assert!(
             total_checked > 30_000,
-            "expected tens of thousands of real files, only found {total_checked} — \
-             is the live zairoot tree still at the expected path?"
+            "expected tens of thousands of real files, only found {total_checked}"
         );
-
         assert!(
             genuine_gaps.is_empty(),
             "{} real files have no working legacy alias:\n{}",
             genuine_gaps.len(),
             genuine_gaps.join("\n")
         );
-
-        // Speed guard — this is meant to stay fast enough to run on every
-        // `cargo test`, not become a multi-second integration test.
-        assert!(
-            elapsed.as_secs() < 5,
-            "full audit took {elapsed:?} for {total_checked} files — too slow"
-        );
+        assert!(elapsed.as_secs() < 5, "full audit took {elapsed:?} — too slow");
     }
 }

@@ -4,11 +4,6 @@ use sys_resolver::audit;
 use sys_resolver::remap::{self, Roots};
 
 /// sys_resolver — dynamic FHS-path resolution logic for ZainiumOS.
-///
-/// Resolution logic only: never mounts, symlinks, patches, or builds
-/// anything. Every root defaults to the real system root `/`; set
-/// `ZAINIUM_ZAIROOT` (or pass `--zairoot`) to point it at a `zairoot` tree
-/// elsewhere for development/testing off-target.
 #[derive(Parser)]
 #[command(name = "sys-resolver", version)]
 struct Cli {
@@ -22,16 +17,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Report what a legacy FHS-shaped path resolves to right now, if
-    /// anything. Dry-run only — never touches the filesystem beyond
-    /// existence checks.
+    /// Report what a legacy FHS-shaped path resolves to right now.
     Resolve {
         /// Absolute path to resolve, e.g. /usr/bin/env
         path: PathBuf,
     },
-    /// Audit the resolver against the real, live tree: real files that no
-    /// legacy-shaped alias reaches, and a small sanity probe of well-known
-    /// commands.
+    /// Audit the resolver against the real, live tree.
     Doctor,
 }
 
@@ -72,10 +63,7 @@ fn cmd_resolve(path: &Path, roots: &Roots) {
     }
 }
 
-/// A small, deliberately short sanity list of well-known legacy command
-/// paths — a diagnostic starting point, not a destination table (it names
-/// nothing about *where* things live, only *what* is worth sanity-checking
-/// after a resolver or layout change).
+/// Sanity probes — not a destination table, just a short well-known list.
 const WELL_KNOWN_PROBES: &[&str] = &[
     "/usr/bin/env",
     "/bin/sh",
