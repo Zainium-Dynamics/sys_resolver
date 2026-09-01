@@ -15,8 +15,9 @@ patch, no libc rebuild, no editing the affected scripts or binaries.
 ## How it works
 
 - `src/remap.rs` — the algorithm: a scope guard (`/bin /sbin /lib /usr
-  /opt` only), a strip-legacy-segments transform, a 3-root probe
-  (`syshub` → `MUSL_SYSDIR` → `zexlib/union`).
+  /opt /var /etc` only — `/home` and `/tmp` are real, already-present
+  top-level dirs, deliberately excluded), a strip-legacy-segments
+  transform, a 3-root probe (`syshub` → `MUSL_SYSDIR` → `zexlib/union`).
 - `src/preload.rs` — `LD_PRELOAD` interposition of `open` / `openat` /
   `access` / `faccessat` / `stat` / `lstat` / `fstatat` / `execve`. Real
   function tried first via `dlsym(RTLD_NEXT, ...)`; only on a genuine

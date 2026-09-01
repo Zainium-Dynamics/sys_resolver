@@ -33,9 +33,17 @@ pub const ZAIROOT_ENV: &str = "ZAINIUM_ZAIROOT";
 /// Legacy FHS top-level prefixes this resolver is allowed to even look at.
 /// Not a destination table — it never says *where* something lives, only
 /// which prefixes are in scope, so an unrelated missing path (`/home/...`,
-/// `/etc/...`, `/proc/...`, ...) is left alone and fails exactly as it
-/// does today instead of being silently redirected by coincidence.
-const SCOPE_GUARD: &[&str] = &["bin", "sbin", "lib", "usr", "opt"];
+/// `/proc/...`, `/dev/...`, ...) is left alone and fails exactly as it does
+/// today instead of being silently redirected by coincidence.
+///
+/// `/home` and `/tmp` are deliberately *not* here: both are real,
+/// already-present top-level directories on this system (confirmed on the
+/// live `zairoot` tree), so there's nothing to resolve — and `zexlib`'s own
+/// `union/tmp`, when it exists, is `zex`'s internal install-staging area
+/// (`local_install_*`, `update-dl/`, per `zex`'s own architecture docs),
+/// not a general-purpose scratch dir; redirecting arbitrary `/tmp` usage
+/// there would be a real bug, not a fix.
+const SCOPE_GUARD: &[&str] = &["bin", "sbin", "lib", "usr", "opt", "var", "etc"];
 
 /// The three real base roots, in the same priority order
 /// `/etc/profile`'s `PATH`/`LD_LIBRARY_PATH` already use.
@@ -203,9 +211,28 @@ mod tests {
     #[test]
     fn scope_guard_refuses_unrelated_prefixes() {
         let roots = live_roots();
-        for p in ["/home/alizain/whatever", "/etc/passwd", "/proc/self", "/tmp/x", "/root/x"] {
+        // /home and /tmp are real, already-present top-level dirs on this
+        // system — nothing to resolve, and deliberately excluded (see
+        // SCOPE_GUARD's doc comment) rather than just "not implemented
+        // yet".
+        for p in ["/home/alizain/whatever", "/proc/self", "/tmp/x", "/root/x"] {
             assert_eq!(resolve(Path::new(p), &roots), None, "should refuse {p}");
         }
+    }
+
+    #[test]
+    fn resolves_var_and_etc_under_syshub() {
+        // Both confirmed real on the live tree — /var and /etc are in
+        // scope alongside bin/sbin/lib/usr/opt.
+        let roots = live_roots();
+        assert_eq!(
+            resolve(Path::new("/var"), &roots),
+            Some(roots.syshub.join("var"))
+        );
+        assert_eq!(
+            resolve(Path::new("/etc/passwd"), &roots),
+            Some(roots.syshub.join("etc/passwd"))
+        );
     }
 
     #[test]
