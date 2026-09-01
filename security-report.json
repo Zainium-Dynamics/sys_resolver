@@ -1,0 +1,40 @@
+{
+  "schema": "",
+  "layout_check": {
+    "policy": "",
+    "result": "passed",
+    "rejected_paths": []
+  },
+  "content_scan": {
+    "description": "",
+    "files_scanned": 0,
+    "matches": []
+  },
+  "manifest_integrity": {
+    "result": "passed",
+    "description": "",
+    "mismatches": []
+  },
+  "permission_audit": {
+    "result": "passed",
+    "setuid_files": [],
+    "description": ""
+  },
+  "rust_audit": {
+    "applicable": false,
+    "language": "unknown",
+    "build_kind": "static",
+    "unsafe_block_count": null,
+    "fuzz_harness_present": false,
+    "tools": []
+  },
+  "c_audit": {
+    "applicable": false,
+    "tools": []
+  },
+  "secrets_scan": {
+    "outcome": "clean",
+    "files_scanned": 0,
+    "findings": []
+  }
+}

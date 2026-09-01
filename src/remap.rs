@@ -56,6 +56,7 @@ pub fn in_scope(path: &Path) -> bool {
 }
 
 /// `/usr/bin/foo` -> `bin/foo`, `/lib64/x` -> `lib/x`, `/bin/foo` unchanged.
+/// `/lib/modules` -> `drivers/modules`, `/lib/firmware` -> `drivers/hardware/firmwares` (real location on this OS, not under `lib/`).
 pub fn strip_legacy(path: &Path) -> Option<PathBuf> {
     let s = path.to_str()?.strip_prefix('/')?;
     let s = s
@@ -66,6 +67,17 @@ pub fn strip_legacy(path: &Path) -> Option<PathBuf> {
         Some(rest) => format!("lib/{rest}"),
         None if s == "lib64" => "lib".to_string(),
         None => s.to_string(),
+    };
+    let s = if let Some(rest) = s.strip_prefix("lib/modules/") {
+        format!("drivers/modules/{rest}")
+    } else if s == "lib/modules" {
+        "drivers/modules".to_string()
+    } else if let Some(rest) = s.strip_prefix("lib/firmware/") {
+        format!("drivers/hardware/firmwares/{rest}")
+    } else if s == "lib/firmware" {
+        "drivers/hardware/firmwares".to_string()
+    } else {
+        s
     };
     if s.is_empty() {
         None
@@ -180,6 +192,25 @@ mod tests {
                 roots.union.join("bin/definitely-not-real"),
             ]
         );
+    }
+
+    #[test]
+    fn strip_legacy_maps_modules_and_firmware_to_drivers() {
+        assert_eq!(
+            strip_legacy(Path::new("/lib/modules/6.1.0/foo.ko")),
+            Some(PathBuf::from("drivers/modules/6.1.0/foo.ko"))
+        );
+        assert_eq!(
+            strip_legacy(Path::new("/lib/firmware/some-device.bin")),
+            Some(PathBuf::from("drivers/hardware/firmwares/some-device.bin"))
+        );
+    }
+
+    #[test]
+    fn resolves_real_firmware_dir_under_drivers() {
+        let roots = live_roots();
+        let got = resolve(Path::new("/lib/firmware"), &roots).unwrap();
+        assert_eq!(got, roots.syshub.join("drivers/hardware/firmwares"));
     }
 
     #[test]
