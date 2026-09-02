@@ -1,5 +1,6 @@
 //! `LD_PRELOAD` interposition of open/openat/access/faccessat/stat/lstat/fstatat/execve/fopen/dlopen — real function first via `dlsym(RTLD_NEXT,...)`, fallback to `remap::candidates` only on genuine ENOENT.
 //! Not covered: `execl`/`execlp`/`execle` (true C variadics, and musl's own exec* internals bypass LD_PRELOAD for these anyway); `fopen64` (musl exposes it as a `#define fopen64 fopen` macro, not a distinct symbol).
+//! Also: unlink/unlinkat/rmdir under syshub are blocked (EPERM) unless the caller is the real `zex` binary (checked via /proc/self/exe) — a safety net against accidental `rm`, not a security boundary.
 
 use crate::remap::{self, Roots};
 use libc::{c_char, c_int};
@@ -331,4 +332,60 @@ pub unsafe extern "C" fn dlopen(path: *const c_char, flags: c_int) -> *mut libc:
         }
     }
     handle
+}}
+
+fn zex_binary_path() -> std::path::PathBuf {
+    roots().syshub.join("bin/zex")
+}
+
+unsafe fn is_protected_and_not_zex(path: *const c_char) -> bool { unsafe {
+    if path.is_null() {
+        return false;
+    }
+    let Ok(s) = CStr::from_ptr(path).to_str() else {
+        return false;
+    };
+    if !s.starts_with(roots().syshub.to_string_lossy().as_ref()) {
+        return false;
+    }
+    match std::fs::read_link("/proc/self/exe") {
+        Ok(exe) => exe != zex_binary_path(),
+        Err(_) => true,
+    }
+}}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int { unsafe {
+    if is_protected_and_not_zex(path) {
+        *libc::__errno_location() = libc::EPERM;
+        return -1;
+    }
+    let real: unsafe extern "C" fn(*const c_char) -> c_int = real_fn!(cell, b"unlink\0", unsafe extern "C" fn(*const c_char) -> c_int);
+    real(path)
+}}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int { unsafe {
+    if is_protected_and_not_zex(path) {
+        *libc::__errno_location() = libc::EPERM;
+        return -1;
+    }
+    let real: unsafe extern "C" fn(*const c_char) -> c_int = real_fn!(cell, b"rmdir\0", unsafe extern "C" fn(*const c_char) -> c_int);
+    real(path)
+}}
+
+type UnlinkatFn = unsafe extern "C" fn(c_int, *const c_char, c_int) -> c_int;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int { unsafe {
+    if dirfd == libc::AT_FDCWD && !path.is_null() {
+        if let Ok(s) = CStr::from_ptr(path).to_str() {
+            if s.starts_with('/') && is_protected_and_not_zex(path) {
+                *libc::__errno_location() = libc::EPERM;
+                return -1;
+            }
+        }
+    }
+    let real: UnlinkatFn = real_fn!(cell, b"unlinkat\0", UnlinkatFn);
+    real(dirfd, path, flags)
 }}
