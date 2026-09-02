@@ -338,6 +338,33 @@ fn zex_binary_path() -> std::path::PathBuf {
     roots().syshub.join("bin/zex")
 }
 
+/// Resolve `dirfd` + a possibly-relative name to a real absolute path.
+/// `dirfd`-relative (not `AT_FDCWD`, not already absolute) goes through
+/// `/proc/self/fd/<dirfd>` — this is what `rm -rf`'s recursive descent
+/// actually uses (`openat` the dir once, then relative `unlinkat` per
+/// entry), so skipping this case would let nested syshub content through.
+unsafe fn resolve_dirfd_relative(dirfd: c_int, name: &str) -> Option<std::path::PathBuf> {
+    if name.starts_with('/') {
+        return Some(std::path::PathBuf::from(name));
+    }
+    if dirfd == libc::AT_FDCWD {
+        return std::env::current_dir().ok().map(|d| d.join(name));
+    }
+    std::fs::read_link(format!("/proc/self/fd/{dirfd}"))
+        .ok()
+        .map(|d| d.join(name))
+}
+
+fn is_protected_path_and_not_zex(path: &std::path::Path) -> bool {
+    if !path.starts_with(&roots().syshub) {
+        return false;
+    }
+    match std::fs::read_link("/proc/self/exe") {
+        Ok(exe) => exe != zex_binary_path(),
+        Err(_) => true,
+    }
+}
+
 unsafe fn is_protected_and_not_zex(path: *const c_char) -> bool { unsafe {
     if path.is_null() {
         return false;
@@ -345,13 +372,7 @@ unsafe fn is_protected_and_not_zex(path: *const c_char) -> bool { unsafe {
     let Ok(s) = CStr::from_ptr(path).to_str() else {
         return false;
     };
-    if !s.starts_with(roots().syshub.to_string_lossy().as_ref()) {
-        return false;
-    }
-    match std::fs::read_link("/proc/self/exe") {
-        Ok(exe) => exe != zex_binary_path(),
-        Err(_) => true,
-    }
+    is_protected_path_and_not_zex(std::path::Path::new(s))
 }}
 
 #[unsafe(no_mangle)]
@@ -378,11 +399,13 @@ type UnlinkatFn = unsafe extern "C" fn(c_int, *const c_char, c_int) -> c_int;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int { unsafe {
-    if dirfd == libc::AT_FDCWD && !path.is_null() {
+    if !path.is_null() {
         if let Ok(s) = CStr::from_ptr(path).to_str() {
-            if s.starts_with('/') && is_protected_and_not_zex(path) {
-                *libc::__errno_location() = libc::EPERM;
-                return -1;
+            if let Some(full) = resolve_dirfd_relative(dirfd, s) {
+                if is_protected_path_and_not_zex(&full) {
+                    *libc::__errno_location() = libc::EPERM;
+                    return -1;
+                }
             }
         }
     }
