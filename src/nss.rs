@@ -173,11 +173,27 @@ pub unsafe fn fill_group(
         let strings_len: usize = name_c.as_bytes_with_nul().len()
             + passwd_c.as_bytes_with_nul().len()
             + member_cs.iter().map(|c| c.as_bytes_with_nul().len()).sum::<usize>();
-        // gr_mem pointer array (including the NULL terminator), pointer-aligned.
+        // gr_mem pointer array (including the NULL terminator) must land on
+        // a pointer-aligned address. `buf` itself is only ever guaranteed
+        // byte alignment (it's a caller-supplied char*, e.g. our own
+        // Vec<c_char> thread-locals below, whose *base* address is not
+        // necessarily pointer-aligned) -- padding the *offset* to a
+        // multiple of align_of::<*mut c_char>() only produces a
+        // pointer-aligned address if `buf` itself already was, which isn't
+        // guaranteed. Use the real runtime pointer's own align_offset()
+        // instead of assuming buf's base alignment.
         let ptr_array_len = (member_cs.len() + 1) * std::mem::size_of::<*mut c_char>();
         let align = std::mem::align_of::<*mut c_char>();
-        let aligned_strings_len = strings_len.div_ceil(align) * align;
-        let needed = aligned_strings_len + ptr_array_len;
+        let pad = (buf as *mut u8).add(strings_len).align_offset(align);
+        // align_offset() can return usize::MAX if it can't be computed
+        // (documented as possible even for a power-of-two align); treat
+        // that as "buffer can't be made to work" rather than let the
+        // following addition silently overflow.
+        if pad == usize::MAX {
+            return Err(libc::ERANGE);
+        }
+        let array_off = strings_len + pad;
+        let needed = array_off + ptr_array_len;
         if needed > buflen {
             return Err(libc::ERANGE);
         }
@@ -194,7 +210,7 @@ pub unsafe fn fill_group(
         let passwd_ptr = write_str(&passwd_c);
         let member_ptrs: Vec<*mut c_char> = member_cs.iter().map(&mut write_str).collect();
 
-        let array_base = buf.add(aligned_strings_len) as *mut *mut c_char;
+        let array_base = buf.add(array_off) as *mut *mut c_char;
         for (i, p) in member_ptrs.iter().enumerate() {
             *array_base.add(i) = *p;
         }
