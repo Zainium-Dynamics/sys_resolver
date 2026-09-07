@@ -1,7 +1,9 @@
-//! `LD_PRELOAD` interposition of open/openat/access/faccessat/stat/lstat/fstatat/execve/fopen/dlopen — real function first via `dlsym(RTLD_NEXT,...)`, fallback to `remap::candidates` only on genuine ENOENT.
+//! `LD_PRELOAD` interposition of open/openat/access/faccessat/stat/lstat/fstatat/execve/fopen/dlopen/getpwnam(_r)/getpwuid(_r)/getgrnam(_r)/getgrgid(_r) — real function first via `dlsym(RTLD_NEXT,...)`, fallback to `remap::candidates`/`nss` only on genuine ENOENT/not-found.
 //! Not covered: `execl`/`execlp`/`execle` (true C variadics, and musl's own exec* internals bypass LD_PRELOAD for these anyway); `fopen64` (musl exposes it as a `#define fopen64 fopen` macro, not a distinct symbol).
+//! `getpwnam`/`getgrnam`/etc. get their own overrides (not just `fopen`) because musl's own `getpwnam()` opens `/etc/passwd` (or, once patched, `/overlayer/syshub/etc/passwd`) via an *internal* call chain to `fopen()` that never goes through the PLT/GOT -- same reason this file's own `execve` doesn't cover musl's `exec*` internals. A caller's call to the public `getpwnam` symbol itself, though, *does* go through normal dynamic symbol resolution, so overriding it here works the same way `open`/`fopen` do for everything else.
 //! Also: unlink/unlinkat/rmdir under syshub are blocked (EPERM) unless the caller is the real `zex` binary (checked via /proc/self/exe) — a safety net against accidental `rm`, not a security boundary.
 
+use crate::nss;
 use crate::remap::{self, Roots};
 use libc::{c_char, c_int};
 use std::ffi::{CStr, CString};
@@ -411,4 +413,228 @@ pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_in
     }
     let real: UnlinkatFn = real_fn!(cell, b"unlinkat\0", UnlinkatFn);
     real(dirfd, path, flags)
+}}
+
+type GetpwnamRFn = unsafe extern "C" fn(
+    *const c_char,
+    *mut libc::passwd,
+    *mut c_char,
+    usize,
+    *mut *mut libc::passwd,
+) -> c_int;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwnam_r(
+    name: *const c_char,
+    pwd: *mut libc::passwd,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut libc::passwd,
+) -> c_int { unsafe {
+    let real: GetpwnamRFn = real_fn!(cell, b"getpwnam_r\0", GetpwnamRFn);
+    let rc = real(name, pwd, buf, buflen, result);
+    if rc == 0 && !(*result).is_null() {
+        return rc;
+    }
+    let Ok(name_str) = CStr::from_ptr(name).to_str() else {
+        return rc;
+    };
+    match nss::lookup_passwd_by_name(name_str) {
+        Some(entry) => match nss::fill_passwd(&entry, pwd, buf, buflen) {
+            Ok(()) => {
+                *result = pwd;
+                0
+            }
+            Err(errno) => errno,
+        },
+        None => {
+            *result = std::ptr::null_mut();
+            0
+        }
+    }
+}}
+
+type GetpwuidRFn = unsafe extern "C" fn(
+    libc::uid_t,
+    *mut libc::passwd,
+    *mut c_char,
+    usize,
+    *mut *mut libc::passwd,
+) -> c_int;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwuid_r(
+    uid: libc::uid_t,
+    pwd: *mut libc::passwd,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut libc::passwd,
+) -> c_int { unsafe {
+    let real: GetpwuidRFn = real_fn!(cell, b"getpwuid_r\0", GetpwuidRFn);
+    let rc = real(uid, pwd, buf, buflen, result);
+    if rc == 0 && !(*result).is_null() {
+        return rc;
+    }
+    match nss::lookup_passwd_by_uid(uid) {
+        Some(entry) => match nss::fill_passwd(&entry, pwd, buf, buflen) {
+            Ok(()) => {
+                *result = pwd;
+                0
+            }
+            Err(errno) => errno,
+        },
+        None => {
+            *result = std::ptr::null_mut();
+            0
+        }
+    }
+}}
+
+type GetgrnamRFn = unsafe extern "C" fn(
+    *const c_char,
+    *mut libc::group,
+    *mut c_char,
+    usize,
+    *mut *mut libc::group,
+) -> c_int;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrnam_r(
+    name: *const c_char,
+    grp: *mut libc::group,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut libc::group,
+) -> c_int { unsafe {
+    let real: GetgrnamRFn = real_fn!(cell, b"getgrnam_r\0", GetgrnamRFn);
+    let rc = real(name, grp, buf, buflen, result);
+    if rc == 0 && !(*result).is_null() {
+        return rc;
+    }
+    let Ok(name_str) = CStr::from_ptr(name).to_str() else {
+        return rc;
+    };
+    match nss::lookup_group_by_name(name_str) {
+        Some(entry) => match nss::fill_group(&entry, grp, buf, buflen) {
+            Ok(()) => {
+                *result = grp;
+                0
+            }
+            Err(errno) => errno,
+        },
+        None => {
+            *result = std::ptr::null_mut();
+            0
+        }
+    }
+}}
+
+type GetgrgidRFn = unsafe extern "C" fn(
+    libc::gid_t,
+    *mut libc::group,
+    *mut c_char,
+    usize,
+    *mut *mut libc::group,
+) -> c_int;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrgid_r(
+    gid: libc::gid_t,
+    grp: *mut libc::group,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut libc::group,
+) -> c_int { unsafe {
+    let real: GetgrgidRFn = real_fn!(cell, b"getgrgid_r\0", GetgrgidRFn);
+    let rc = real(gid, grp, buf, buflen, result);
+    if rc == 0 && !(*result).is_null() {
+        return rc;
+    }
+    match nss::lookup_group_by_gid(gid) {
+        Some(entry) => match nss::fill_group(&entry, grp, buf, buflen) {
+            Ok(()) => {
+                *result = grp;
+                0
+            }
+            Err(errno) => errno,
+        },
+        None => {
+            *result = std::ptr::null_mut();
+            0
+        }
+    }
+}}
+
+// Non-reentrant getpwnam/getpwuid/getgrnam/getgrgid return a pointer into
+// a static buffer owned by libc -- matched here with our own thread-local
+// static storage, filled via the same _r logic above.
+std::thread_local! {
+    static PW_BUF: std::cell::RefCell<(libc::passwd, Vec<c_char>)> = std::cell::RefCell::new((
+        unsafe { std::mem::zeroed() },
+        vec![0; 4096],
+    ));
+    static GR_BUF: std::cell::RefCell<(libc::group, Vec<c_char>)> = std::cell::RefCell::new((
+        unsafe { std::mem::zeroed() },
+        vec![0; 4096],
+    ));
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut libc::passwd { unsafe {
+    PW_BUF.with(|cell| {
+        let mut b = cell.borrow_mut();
+        let (pwd, buf) = &mut *b;
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let rc = getpwnam_r(name, pwd as *mut _, buf.as_mut_ptr(), buf.len(), &mut result);
+        if rc == 0 {
+            result
+        } else {
+            std::ptr::null_mut()
+        }
+    })
+}}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwuid(uid: libc::uid_t) -> *mut libc::passwd { unsafe {
+    PW_BUF.with(|cell| {
+        let mut b = cell.borrow_mut();
+        let (pwd, buf) = &mut *b;
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let rc = getpwuid_r(uid, pwd as *mut _, buf.as_mut_ptr(), buf.len(), &mut result);
+        if rc == 0 {
+            result
+        } else {
+            std::ptr::null_mut()
+        }
+    })
+}}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrnam(name: *const c_char) -> *mut libc::group { unsafe {
+    GR_BUF.with(|cell| {
+        let mut b = cell.borrow_mut();
+        let (grp, buf) = &mut *b;
+        let mut result: *mut libc::group = std::ptr::null_mut();
+        let rc = getgrnam_r(name, grp as *mut _, buf.as_mut_ptr(), buf.len(), &mut result);
+        if rc == 0 {
+            result
+        } else {
+            std::ptr::null_mut()
+        }
+    })
+}}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrgid(gid: libc::gid_t) -> *mut libc::group { unsafe {
+    GR_BUF.with(|cell| {
+        let mut b = cell.borrow_mut();
+        let (grp, buf) = &mut *b;
+        let mut result: *mut libc::group = std::ptr::null_mut();
+        let rc = getgrgid_r(gid, grp as *mut _, buf.as_mut_ptr(), buf.len(), &mut result);
+        if rc == 0 {
+            result
+        } else {
+            std::ptr::null_mut()
+        }
+    })
 }}

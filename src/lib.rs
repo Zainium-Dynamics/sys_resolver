@@ -2,5 +2,6 @@
 
 pub mod audit;
 pub mod ffi;
+pub mod nss;
 pub mod preload;
 pub mod remap;
