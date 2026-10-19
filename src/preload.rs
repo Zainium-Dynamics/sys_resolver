@@ -19,6 +19,11 @@
 //! Code that can run in a `vfork()` child (the exec hooks) does not allocate unless a path
 //! actually has to be remapped, and every real function is looked up when the library loads.
 
+// C's `open`/`openat` are variadic and stable Rust can't define a variadic function; newer
+// rustc denies exporting them with a fixed signature. On x86_64 the fixed (path, flags, mode)
+// form receives exactly what a variadic call passes: mode is in the same register either way.
+#![allow(unknown_lints, invalid_runtime_symbol_definitions)]
+
 use crate::nss;
 use crate::remap::{self, Roots};
 use libc::{c_char, c_int, c_void};
