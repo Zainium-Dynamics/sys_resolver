@@ -1,0 +1,13 @@
+/* Only the hooks are exported: nothing else of the library (Rust's std, the unwinder) can
+   interpose a symbol of the program it is loaded into. */
+{
+  global:
+    open; open64; openat; openat64; creat; access; faccessat;
+    stat; stat64; lstat; lstat64; fstatat; fstatat64; statx;
+    fopen; fopen64; freopen; opendir; readlink; realpath; chdir; dlopen;
+    execve; execv; execvp; execvpe; posix_spawn; posix_spawnp;
+    unlink; unlinkat; rmdir;
+    getpwnam; getpwnam_r; getpwuid; getpwuid_r; getgrnam; getgrnam_r; getgrgid; getgrgid_r;
+    sys_resolver_candidates;
+  local: *;
+};
