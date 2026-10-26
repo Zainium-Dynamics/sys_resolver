@@ -7,7 +7,8 @@ No mount, no symlink, no kernel patch, no libc rebuild, no editing scripts/binar
 ## Files
 
 - `src/remap.rs` — scope guard (`bin sbin lib usr opt var etc boot`), path transform, 4-root probe.
-- `src/preload.rs` — `LD_PRELOAD` interposition: `open openat creat access faccessat stat lstat fstatat statx fopen freopen opendir readlink realpath chdir dlopen` (+ the `*64` names glibc programs call), `execve execv execvp execvpe posix_spawn posix_spawnp`, `getpw*`/`getgr*`, and the delete guard on `unlink unlinkat rmdir`.
+- `src/preload.rs` — `LD_PRELOAD` interposition: `open openat creat access eaccess euidaccess faccessat stat lstat fstatat statx statfs statvfs fopen freopen opendir scandir ftw nftw readlink readlinkat realpath canonicalize_file_name pathconf getxattr lgetxattr listxattr llistxattr inotify_add_watch chdir dlopen` (+ the `*64` names, glibc's `__open_2`/`__openat_2` fortify entries and its old `__xstat` family), `execve execveat execv execvp execvpe posix_spawn posix_spawnp`, `getpw*`/`getgr*`, and the delete guard on `unlink unlinkat rmdir`.
+- `src/execl.c` — `execl execlp execle` (C variadics), through the same exec hooks.
 - `src/nss.rs` — passwd/group fallback for the `getpw*`/`getgr*` hooks.
 - `src/audit.rs`, `src/main.rs` — `sys-resolver doctor` / `sys-resolver resolve <path>`.
 - `src/ffi.rs` — C ABI export.
@@ -22,7 +23,7 @@ No mount, no symlink, no kernel patch, no libc rebuild, no editing scripts/binar
 
 ## Not covered
 
-- `execl`/`execlp`/`execle` — C variadics.
+- File lookups libc makes internally (musl's timezone search, for one): no call reaches a hook.
 - Static and setuid programs — the loader preloads nothing into them.
 - A prebuilt binary's `PT_INTERP` — read by the kernel before any userspace code runs.
 

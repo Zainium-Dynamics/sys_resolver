@@ -2,17 +2,23 @@
 //! `dlsym(RTLD_NEXT, ...)`) and falls back to `remap::candidates`/`nss` only on a genuine
 //! ENOENT / not-found, so a path that exists is never touched.
 //!
-//! Hooked: open openat creat access faccessat stat lstat fstatat statx fopen freopen opendir
-//! readlink realpath chdir dlopen (+ the `*64` names glibc programs call), execve execv execvp
-//! execvpe posix_spawn posix_spawnp, getpwnam getpwuid getgrnam getgrgid (+ `_r`), and
-//! unlink unlinkat rmdir (see [`refuses_delete`]).
+//! Hooked: open openat creat access eaccess euidaccess faccessat stat lstat fstatat statx statfs
+//! statvfs fopen freopen opendir scandir ftw nftw readlink readlinkat realpath
+//! canonicalize_file_name pathconf getxattr lgetxattr listxattr llistxattr inotify_add_watch chdir
+//! dlopen (+ the `*64` names, glibc's `__open_2`/`__openat_2` fortify entries and its old
+//! `__xstat` family), execve execv execvp execvpe execveat posix_spawn posix_spawnp (and execl
+//! execlp execle in `execl.c`), getpwnam getpwuid getgrnam getgrgid (+ `_r`), and unlink unlinkat rmdir
+//! (see [`refuses_delete`]).
 //!
 //! musl calls its own functions directly, never through the PLT, so `execv`, `execvp` and
 //! `posix_spawn` (which Rust's `Command`, Python's `subprocess` and most launchers use) never
 //! reach the `execve` hook: each gets its own hook. musl's `getpwnam()` reads the passwd file
 //! through an internal `fopen()` for the same reason, hence the `getpw*`/`getgr*` hooks.
-//! Not covered: `execl`/`execlp`/`execle` (C variadics), static and setuid programs (the loader
-//! preloads nothing into them), a prebuilt binary's `PT_INTERP` (read by the kernel).
+//! The same goes for a program's own check before it runs something: GNU make (gnulib's
+//! `find_in_given_path`) tests its `/bin/sh` with `eaccess()`, which in musl calls the internal
+//! `faccessat`, so `eaccess`/`euidaccess` are hooked too.
+//! Not covered: static and setuid programs (the loader preloads nothing into them), a prebuilt
+//! binary's `PT_INTERP` (read by the kernel).
 //!
 //! The library is linked without a libc of its own (see `build-so.sh`): its libc calls bind to
 //! the libc of the program it is loaded into, so it works the same in musl and glibc programs.
@@ -78,6 +84,22 @@ type SpawnFn = unsafe extern "C" fn(
     *const *const c_char,
 ) -> c_int;
 type UnlinkFn = unsafe extern "C" fn(*const c_char) -> c_int;
+type XstatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat) -> c_int;
+type FxstatatFn = unsafe extern "C" fn(c_int, c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
+type StatfsFn = unsafe extern "C" fn(*const c_char, *mut c_void) -> c_int;
+type Open2Fn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
+type Openat2Fn = unsafe extern "C" fn(c_int, *const c_char, c_int) -> c_int;
+type ReadlinkatFn = unsafe extern "C" fn(c_int, *const c_char, *mut c_char, usize) -> isize;
+type ScandirFn = unsafe extern "C" fn(*const c_char, *mut c_void, *const c_void, *const c_void) -> c_int;
+type CanonicalizeFn = unsafe extern "C" fn(*const c_char) -> *mut c_char;
+type InotifyAddFn = unsafe extern "C" fn(c_int, *const c_char, u32) -> c_int;
+type FtwFn = unsafe extern "C" fn(*const c_char, *const c_void, c_int) -> c_int;
+type NftwFn = unsafe extern "C" fn(*const c_char, *const c_void, c_int, c_int) -> c_int;
+type ExecveatFn =
+    unsafe extern "C" fn(c_int, *const c_char, *const *const c_char, *const *const c_char, c_int) -> c_int;
+type PathconfFn = unsafe extern "C" fn(*const c_char, c_int) -> libc::c_long;
+type GetxattrFn = unsafe extern "C" fn(*const c_char, *const c_char, *mut c_void, usize) -> isize;
+type ListxattrFn = unsafe extern "C" fn(*const c_char, *mut c_char, usize) -> isize;
 type UnlinkatFn = unsafe extern "C" fn(c_int, *const c_char, c_int) -> c_int;
 type GetpwnamRFn = unsafe extern "C" fn(
     *const c_char,
@@ -117,7 +139,38 @@ struct Real {
     openat64: Option<OpenatFn>,
     creat: Option<CreatFn>,
     access: Option<AccessFn>,
+    eaccess: Option<AccessFn>,
+    euidaccess: Option<AccessFn>,
     faccessat: Option<FaccessatFn>,
+    open_2: Option<Open2Fn>,
+    open64_2: Option<Open2Fn>,
+    openat_2: Option<Openat2Fn>,
+    openat64_2: Option<Openat2Fn>,
+    xstat: Option<XstatFn>,
+    xstat64: Option<XstatFn>,
+    lxstat: Option<XstatFn>,
+    lxstat64: Option<XstatFn>,
+    fxstatat: Option<FxstatatFn>,
+    fxstatat64: Option<FxstatatFn>,
+    statfs: Option<StatfsFn>,
+    statfs64: Option<StatfsFn>,
+    statvfs: Option<StatfsFn>,
+    statvfs64: Option<StatfsFn>,
+    freopen64: Option<FreopenFn>,
+    scandir: Option<ScandirFn>,
+    readlinkat: Option<ReadlinkatFn>,
+    canonicalize_file_name: Option<CanonicalizeFn>,
+    inotify_add_watch: Option<InotifyAddFn>,
+    ftw: Option<FtwFn>,
+    ftw64: Option<FtwFn>,
+    nftw: Option<NftwFn>,
+    nftw64: Option<NftwFn>,
+    execveat: Option<ExecveatFn>,
+    pathconf: Option<PathconfFn>,
+    getxattr: Option<GetxattrFn>,
+    lgetxattr: Option<GetxattrFn>,
+    listxattr: Option<ListxattrFn>,
+    llistxattr: Option<ListxattrFn>,
     stat: Option<StatFn>,
     stat64: Option<StatFn>,
     lstat: Option<StatFn>,
@@ -163,7 +216,38 @@ impl Real {
                 openat64: next(c"openat64"),
                 creat: next(c"creat"),
                 access: next(c"access"),
+                eaccess: next(c"eaccess"),
+                euidaccess: next(c"euidaccess"),
                 faccessat: next(c"faccessat"),
+                open_2: next(c"__open_2"),
+                open64_2: next(c"__open64_2"),
+                openat_2: next(c"__openat_2"),
+                openat64_2: next(c"__openat64_2"),
+                xstat: next(c"__xstat"),
+                xstat64: next(c"__xstat64"),
+                lxstat: next(c"__lxstat"),
+                lxstat64: next(c"__lxstat64"),
+                fxstatat: next(c"__fxstatat"),
+                fxstatat64: next(c"__fxstatat64"),
+                statfs: next(c"statfs"),
+                statfs64: next(c"statfs64"),
+                statvfs: next(c"statvfs"),
+                statvfs64: next(c"statvfs64"),
+                freopen64: next(c"freopen64"),
+                scandir: next(c"scandir"),
+                readlinkat: next(c"readlinkat"),
+                canonicalize_file_name: next(c"canonicalize_file_name"),
+                inotify_add_watch: next(c"inotify_add_watch"),
+                ftw: next(c"ftw"),
+                ftw64: next(c"ftw64"),
+                nftw: next(c"nftw"),
+                nftw64: next(c"nftw64"),
+                execveat: next(c"execveat"),
+                pathconf: next(c"pathconf"),
+                getxattr: next(c"getxattr"),
+                lgetxattr: next(c"lgetxattr"),
+                listxattr: next(c"listxattr"),
+                llistxattr: next(c"llistxattr"),
                 stat: next(c"stat"),
                 stat64: next(c"stat64"),
                 lstat: next(c"lstat"),
@@ -329,6 +413,58 @@ pub unsafe extern "C" fn faccessat(dirfd: c_int, path: *const c_char, mode: c_in
     }
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eaccess(path: *const c_char, mode: c_int) -> c_int {
+    unsafe {
+        let Some(real) = real().eaccess.or(real().euidaccess) else { return missing(-1) };
+        with_fallback(path, neg_int, |p| real(p, mode))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn euidaccess(path: *const c_char, mode: c_int) -> c_int {
+    unsafe {
+        let Some(real) = real().euidaccess.or(real().eaccess) else { return missing(-1) };
+        with_fallback(path, neg_int, |p| real(p, mode))
+    }
+}
+
+// glibc's fortified `open`/`openat` (`_FORTIFY_SOURCE` builds call these instead)
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __open_2(path: *const c_char, flags: c_int) -> c_int {
+    unsafe {
+        let Some(real) = real().open_2 else { return open(path, flags, 0) };
+        with_fallback(path, neg_int, |p| real(p, flags))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __open64_2(path: *const c_char, flags: c_int) -> c_int {
+    unsafe {
+        let Some(real) = real().open64_2.or(real().open_2) else { return open64(path, flags, 0) };
+        with_fallback(path, neg_int, |p| real(p, flags))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __openat_2(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int {
+    unsafe {
+        let Some(real) = real().openat_2 else { return openat(dirfd, path, flags, 0) };
+        with_fallback(path, neg_int, |p| real(dirfd, p, flags))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __openat64_2(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int {
+    unsafe {
+        let Some(real) = real().openat64_2.or(real().openat_2) else {
+            return openat64(dirfd, path, flags, 0);
+        };
+        with_fallback(path, neg_int, |p| real(dirfd, p, flags))
+    }
+}
+
 unsafe fn stat_with(real: Option<StatFn>, path: *const c_char, buf: *mut libc::stat) -> c_int {
     unsafe {
         let Some(real) = real else { return missing(-1) };
@@ -393,6 +529,98 @@ pub unsafe extern "C" fn statx(
     }
 }
 
+// glibc before 2.33 compiled `stat()` into calls to these
+
+unsafe fn xstat_with(real: Option<XstatFn>, ver: c_int, path: *const c_char, buf: *mut libc::stat) -> c_int {
+    unsafe {
+        let Some(real) = real else { return missing(-1) };
+        with_fallback(path, neg_int, |p| real(ver, p, buf))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __xstat(ver: c_int, path: *const c_char, buf: *mut libc::stat) -> c_int {
+    unsafe { xstat_with(real().xstat, ver, path, buf) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __xstat64(ver: c_int, path: *const c_char, buf: *mut libc::stat) -> c_int {
+    unsafe { xstat_with(real().xstat64.or(real().xstat), ver, path, buf) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __lxstat(ver: c_int, path: *const c_char, buf: *mut libc::stat) -> c_int {
+    unsafe { xstat_with(real().lxstat, ver, path, buf) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __lxstat64(ver: c_int, path: *const c_char, buf: *mut libc::stat) -> c_int {
+    unsafe { xstat_with(real().lxstat64.or(real().lxstat), ver, path, buf) }
+}
+
+unsafe fn fxstatat_with(
+    real: Option<FxstatatFn>,
+    ver: c_int,
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+    flag: c_int,
+) -> c_int {
+    unsafe {
+        let Some(real) = real else { return missing(-1) };
+        with_fallback(path, neg_int, |p| real(ver, dirfd, p, buf, flag))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __fxstatat(
+    ver: c_int,
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+    flag: c_int,
+) -> c_int {
+    unsafe { fxstatat_with(real().fxstatat, ver, dirfd, path, buf, flag) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __fxstatat64(
+    ver: c_int,
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+    flag: c_int,
+) -> c_int {
+    unsafe { fxstatat_with(real().fxstatat64.or(real().fxstatat), ver, dirfd, path, buf, flag) }
+}
+
+unsafe fn statfs_with(real: Option<StatfsFn>, path: *const c_char, buf: *mut c_void) -> c_int {
+    unsafe {
+        let Some(real) = real else { return missing(-1) };
+        with_fallback(path, neg_int, |p| real(p, buf))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn statfs(path: *const c_char, buf: *mut c_void) -> c_int {
+    unsafe { statfs_with(real().statfs, path, buf) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn statfs64(path: *const c_char, buf: *mut c_void) -> c_int {
+    unsafe { statfs_with(real().statfs64.or(real().statfs), path, buf) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn statvfs(path: *const c_char, buf: *mut c_void) -> c_int {
+    unsafe { statfs_with(real().statvfs, path, buf) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn statvfs64(path: *const c_char, buf: *mut c_void) -> c_int {
+    unsafe { statfs_with(real().statvfs64.or(real().statvfs), path, buf) }
+}
+
 unsafe fn fopen_with(real: Option<FopenFn>, path: *const c_char, mode: *const c_char) -> *mut libc::FILE {
     unsafe {
         let Some(real) = real else { return missing(std::ptr::null_mut()) };
@@ -416,8 +644,26 @@ pub unsafe extern "C" fn freopen(
     mode: *const c_char,
     stream: *mut libc::FILE,
 ) -> *mut libc::FILE {
+    unsafe { freopen_with(real().freopen, path, mode, stream) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn freopen64(
+    path: *const c_char,
+    mode: *const c_char,
+    stream: *mut libc::FILE,
+) -> *mut libc::FILE {
+    unsafe { freopen_with(real().freopen64.or(real().freopen), path, mode, stream) }
+}
+
+unsafe fn freopen_with(
+    real: Option<FreopenFn>,
+    path: *const c_char,
+    mode: *const c_char,
+    stream: *mut libc::FILE,
+) -> *mut libc::FILE {
     unsafe {
-        let Some(real) = real().freopen else { return missing(std::ptr::null_mut()) };
+        let Some(real) = real else { return missing(std::ptr::null_mut()) };
         // freopen closes `stream` even when the open fails, so only one attempt is possible:
         // pick the path that exists first.
         if !path.is_null() && !exists(path) {
@@ -438,10 +684,31 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn scandir(
+    path: *const c_char,
+    namelist: *mut c_void,
+    filter: *const c_void,
+    compar: *const c_void,
+) -> c_int {
+    unsafe {
+        let Some(real) = real().scandir else { return missing(-1) };
+        with_fallback(path, neg_int, |p| real(p, namelist, filter, compar))
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, size: usize) -> isize {
     unsafe {
         let Some(real) = real().readlink else { return missing(-1) };
         with_fallback(path, neg_isize, |p| real(p, buf, size))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn readlinkat(dirfd: c_int, path: *const c_char, buf: *mut c_char, size: usize) -> isize {
+    unsafe {
+        let Some(real) = real().readlinkat else { return missing(-1) };
+        with_fallback(path, neg_isize, |p| real(dirfd, p, buf, size))
     }
 }
 
@@ -451,6 +718,112 @@ pub unsafe extern "C" fn realpath(path: *const c_char, resolved: *mut c_char) ->
         let Some(real) = real().realpath else { return missing(std::ptr::null_mut()) };
         with_fallback(path, null_ptr, |p| real(p, resolved))
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn canonicalize_file_name(path: *const c_char) -> *mut c_char {
+    unsafe {
+        let Some(real) = real().canonicalize_file_name else { return realpath(path, std::ptr::null_mut()) };
+        with_fallback(path, null_ptr, |p| real(p))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inotify_add_watch(fd: c_int, path: *const c_char, mask: u32) -> c_int {
+    unsafe {
+        let Some(real) = real().inotify_add_watch else { return missing(-1) };
+        with_fallback(path, neg_int, |p| real(fd, p, mask))
+    }
+}
+
+// ftw/nftw walk the tree with libc's own opendir/stat, so only the starting point is ours
+
+unsafe fn ftw_with(real: Option<FtwFn>, path: *const c_char, f: *const c_void, fds: c_int) -> c_int {
+    unsafe {
+        let Some(real) = real else { return missing(-1) };
+        with_fallback(path, neg_int, |p| real(p, f, fds))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ftw(path: *const c_char, f: *const c_void, fds: c_int) -> c_int {
+    unsafe { ftw_with(real().ftw, path, f, fds) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ftw64(path: *const c_char, f: *const c_void, fds: c_int) -> c_int {
+    unsafe { ftw_with(real().ftw64.or(real().ftw), path, f, fds) }
+}
+
+unsafe fn nftw_with(
+    real: Option<NftwFn>,
+    path: *const c_char,
+    f: *const c_void,
+    fds: c_int,
+    flags: c_int,
+) -> c_int {
+    unsafe {
+        let Some(real) = real else { return missing(-1) };
+        with_fallback(path, neg_int, |p| real(p, f, fds, flags))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nftw(path: *const c_char, f: *const c_void, fds: c_int, flags: c_int) -> c_int {
+    unsafe { nftw_with(real().nftw, path, f, fds, flags) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nftw64(path: *const c_char, f: *const c_void, fds: c_int, flags: c_int) -> c_int {
+    unsafe { nftw_with(real().nftw64.or(real().nftw), path, f, fds, flags) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pathconf(path: *const c_char, name: c_int) -> libc::c_long {
+    unsafe {
+        let Some(real) = real().pathconf else { return missing(-1) };
+        with_fallback(path, |r: &libc::c_long| *r < 0, |p| real(p, name))
+    }
+}
+
+unsafe fn getxattr_with(
+    real: Option<GetxattrFn>,
+    path: *const c_char,
+    name: *const c_char,
+    value: *mut c_void,
+    size: usize,
+) -> isize {
+    unsafe {
+        let Some(real) = real else { return missing(-1) };
+        with_fallback(path, neg_isize, |p| real(p, name, value, size))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getxattr(path: *const c_char, name: *const c_char, value: *mut c_void, size: usize) -> isize {
+    unsafe { getxattr_with(real().getxattr, path, name, value, size) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lgetxattr(path: *const c_char, name: *const c_char, value: *mut c_void, size: usize) -> isize {
+    unsafe { getxattr_with(real().lgetxattr, path, name, value, size) }
+}
+
+unsafe fn listxattr_with(real: Option<ListxattrFn>, path: *const c_char, list: *mut c_char, size: usize) -> isize {
+    unsafe {
+        let Some(real) = real else { return missing(-1) };
+        with_fallback(path, neg_isize, |p| real(p, list, size))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn listxattr(path: *const c_char, list: *mut c_char, size: usize) -> isize {
+    unsafe { listxattr_with(real().listxattr, path, list, size) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn llistxattr(path: *const c_char, list: *mut c_char, size: usize) -> isize {
+    unsafe { listxattr_with(real().llistxattr, path, list, size) }
 }
 
 #[unsafe(no_mangle)]
@@ -591,6 +964,26 @@ pub unsafe extern "C" fn execve(
         match prepare_exec(path, argv) {
             Some(e) => real(e.file.as_ptr(), e.argv(argv), envp),
             None => real(path, argv, envp),
+        }
+    }
+}
+
+/// A path relative to a directory fd is the caller's own business; absolute paths and ones
+/// relative to the cwd (the forms an FHS path takes) go through the same remapping as execve.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn execveat(
+    dirfd: c_int,
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+    flags: c_int,
+) -> c_int {
+    unsafe {
+        let Some(real) = real().execveat else { return missing(-1) };
+        let fhs_form = !path.is_null() && (*path == b'/' as c_char || dirfd == libc::AT_FDCWD);
+        match if fhs_form { prepare_exec(path, argv) } else { None } {
+            Some(e) => real(dirfd, e.file.as_ptr(), e.argv(argv), envp, flags),
+            None => real(dirfd, path, argv, envp, flags),
         }
     }
 }
