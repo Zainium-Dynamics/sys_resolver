@@ -17,8 +17,10 @@
 //! The same goes for a program's own check before it runs something: GNU make (gnulib's
 //! `find_in_given_path`) tests its `/bin/sh` with `eaccess()`, which in musl calls the internal
 //! `faccessat`, so `eaccess`/`euidaccess` are hooked too.
-//! Not covered: static and setuid programs (the loader preloads nothing into them), a prebuilt
-//! binary's `PT_INTERP` (read by the kernel).
+//! A prebuilt program whose loader isn't on this system (`/lib64/ld-linux-x86-64.so.2`,
+//! `/lib/ld-musl-x86_64.so.1`) is started through this system's copy of it, given the program.
+//! Not covered: static and setuid programs (the loader preloads nothing into them), and the
+//! loader of a program they start (the kernel reads `PT_INTERP`).
 //!
 //! The library is linked without a libc of its own (see `build-so.sh`): its libc calls bind to
 //! the libc of the program it is loaded into, so it works the same in musl and glibc programs.
@@ -894,8 +896,69 @@ fn parse_shebang(head: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
     Some((interp, (!rest.is_empty()).then_some(rest)))
 }
 
+const PT_INTERP: u32 = 3;
+
+/// The `PT_INTERP` path of the 64-bit ELF program open on `fd`, NUL-terminated in `buf`; its
+/// length, or `None` for a static program.
+unsafe fn elf_interp(fd: c_int, buf: &mut [u8; libc::PATH_MAX as usize]) -> Option<usize> {
+    unsafe {
+        let read_at = |dst: &mut [u8], off: u64| {
+            libc::pread(fd, dst.as_mut_ptr() as *mut c_void, dst.len(), off as libc::off_t)
+        };
+        let u16_at = |b: &[u8], i: usize| u16::from_le_bytes([b[i], b[i + 1]]) as u64;
+        let u64_at = |b: &[u8], i: usize| {
+            let mut v = [0u8; 8];
+            v.copy_from_slice(&b[i..i + 8]);
+            u64::from_le_bytes(v)
+        };
+        let mut eh = [0u8; 64];
+        // ELFCLASS64, little-endian
+        if read_at(&mut eh, 0) != 64 || eh[..4] != *b"\x7fELF" || eh[4] != 2 || eh[5] != 1 {
+            return None;
+        }
+        let (phoff, phentsize, phnum) = (u64_at(&eh, 32), u16_at(&eh, 54), u16_at(&eh, 56));
+        if phentsize < 56 {
+            return None;
+        }
+        for i in 0..phnum {
+            let mut ph = [0u8; 56];
+            if read_at(&mut ph, phoff + i * phentsize) != 56 {
+                return None;
+            }
+            if u32::from_le_bytes([ph[0], ph[1], ph[2], ph[3]]) != PT_INTERP {
+                continue;
+            }
+            let size = (u64_at(&ph, 32) as usize).min(buf.len() - 1);
+            let n = read_at(&mut buf[..size], u64_at(&ph, 8));
+            if n <= 0 {
+                return None;
+            }
+            let len = buf[..n as usize].iter().position(|&b| b == 0).unwrap_or(n as usize);
+            buf[len] = 0;
+            return Some(len);
+        }
+        None
+    }
+}
+
+/// This system's copy of the loader a prebuilt program names (`/lib64/ld-linux-x86-64.so.2`,
+/// `/lib/ld-musl-x86_64.so.1`): glibc's lives in its own directory in the userland, musl's in
+/// the base. There is no `/lib64` or `/lib`.
+fn system_loader(interp: &[u8]) -> Option<CString> {
+    let name = &interp[interp.iter().rposition(|&b| b == b'/').map_or(0, |i| i + 1)..];
+    let dir = if name.starts_with(b"ld-linux") {
+        roots().union.join("x86_64-zainium-linux-gnu/lib")
+    } else if name.starts_with(b"ld-musl") {
+        roots().musl_sysdir.join("lib")
+    } else {
+        return None;
+    };
+    CString::new(dir.join(std::ffi::OsStr::from_bytes(name)).as_os_str().as_bytes()).ok()
+}
+
 /// Find where `path` really is and, for a script whose `#!` interpreter isn't where the line
-/// says (`#!/bin/sh`, `#!/usr/bin/env python3`), the argv that starts it through the real one.
+/// says (`#!/bin/sh`, `#!/usr/bin/env python3`) or a program whose loader isn't
+/// (`/lib64/ld-linux-x86-64.so.2`), the argv that starts it through the real one.
 /// `None` means run it unchanged. That common case allocates nothing.
 unsafe fn prepare_exec(path: *const c_char, argv: *const *const c_char) -> Option<Exec> {
     unsafe {
@@ -910,11 +973,36 @@ unsafe fn prepare_exec(path: *const c_char, argv: *const *const c_char) -> Optio
 
         let mut head = [0u8; SHEBANG_MAX];
         let mut n = 0isize;
+        let mut interp = [0u8; libc::PATH_MAX as usize];
+        let mut interp_len = None;
         if let Some(open) = real().open {
             let fd = open(target, libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK, 0);
             if fd >= 0 {
                 n = libc::read(fd, head.as_mut_ptr() as *mut c_void, head.len());
+                if n >= 4 && head[..4] == *b"\x7fELF" {
+                    interp_len = elf_interp(fd, &mut interp);
+                }
                 libc::close(fd);
+            }
+        }
+        if let Some(len) = interp_len {
+            if !exists(interp.as_ptr() as *const c_char) {
+                if let Some(loader) = system_loader(&interp[..len]).filter(|l| exists(l.as_ptr())) {
+                    let program = file.unwrap_or_else(|| CStr::from_ptr(path).to_owned());
+                    let has_argv = !argv.is_null() && !(*argv).is_null();
+                    let argv0 = if has_argv { *argv } else { program.as_ptr() };
+                    // what the kernel would have run: the loader, given the program
+                    let mut v = vec![loader.as_ptr(), c"--argv0".as_ptr(), argv0, program.as_ptr()];
+                    if has_argv {
+                        let mut i = 1;
+                        while !(*argv.add(i)).is_null() {
+                            v.push(*argv.add(i));
+                            i += 1;
+                        }
+                    }
+                    v.push(std::ptr::null());
+                    return Some(Exec { file: loader, _keep: vec![program], argv: Some(v) });
+                }
             }
         }
         if n > 0 {

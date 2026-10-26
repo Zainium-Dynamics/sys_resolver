@@ -18,6 +18,7 @@ No mount, no symlink, no kernel patch, no libc rebuild, no editing scripts/binar
 
 - A path that exists is never touched; only an ENOENT is retried under the real roots.
 - Scripts whose `#!` interpreter isn't where the line says (`#!/bin/sh`, `#!/usr/bin/env python3`) are started through the real interpreter, whichever way they are run: `execve`, `execv`, `execvp`, `posix_spawn` (Rust's `Command`, Python's `subprocess`).
+- Prebuilt programs whose loader isn't on this system (`/lib64/ld-linux-x86-64.so.2`, `/lib/ld-musl-x86_64.so.1`) are started through this system's copy of it, the same ways: glibc's loader in its own directory (`/overlayer/zexlib/union/x86_64-zainium-linux-gnu/lib`), musl's in the base. Such a program sees the loader as `/proc/self/exe`.
 - Deleting under `/overlayer/syshub` is refused only for files of the base itself, and only for programs other than zex. `var/`, `etc/` and everything in the userland layer (`zexlib/union`) can be deleted by anyone. A safety net against a stray `rm -rf`, not a security boundary.
 - The library has no libc of its own: its libc calls bind to the libc of the program it is loaded into, so it works the same in musl and glibc programs, and a glibc program never gets musl loaded next to glibc.
 
@@ -25,7 +26,7 @@ No mount, no symlink, no kernel patch, no libc rebuild, no editing scripts/binar
 
 - File lookups libc makes internally (musl's timezone search, for one): no call reaches a hook.
 - Static and setuid programs — the loader preloads nothing into them.
-- A prebuilt binary's `PT_INTERP` — read by the kernel before any userspace code runs.
+- The loader of a program started by a static or setuid program (the kernel reads `PT_INTERP`).
 
 ## Building
 
