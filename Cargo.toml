@@ -1,6 +1,6 @@
 [package]
 name = "sys_resolver"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Dynamic FHS-path resolution logic for ZainiumOS"
 license = "GPL-3.0-only"
@@ -14,6 +14,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "sys-resolver"
 path = "src/main.rs"
+
+[features]
+# The LD_PRELOAD hooks (open, stat, execve, ...), for libsys_resolver.so only (build-so.sh):
+# in a program that links the crate they would stand in for its own libc functions.
+preload = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

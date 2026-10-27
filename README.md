@@ -10,7 +10,8 @@ No mount, no symlink, no kernel patch, no libc rebuild, no editing scripts/binar
 - `src/preload.rs` — `LD_PRELOAD` interposition: `open openat creat access eaccess euidaccess faccessat stat lstat fstatat statx statfs statvfs fopen freopen opendir scandir ftw nftw readlink readlinkat realpath canonicalize_file_name pathconf getxattr lgetxattr listxattr llistxattr inotify_add_watch chdir dlopen` (+ the `*64` names, glibc's `__open_2`/`__openat_2` fortify entries and its old `__xstat` family), `execve execveat execv execvp execvpe posix_spawn posix_spawnp`, `getpw*`/`getgr*`, and the delete guard on `unlink unlinkat rmdir`.
 - `src/execl.c` — `execl execlp execle` (C variadics), through the same exec hooks.
 - `src/nss.rs` — passwd/group fallback for the `getpw*`/`getgr*` hooks.
-- `src/audit.rs`, `src/main.rs` — `sys-resolver doctor` / `sys-resolver resolve <path>`.
+- `src/audit.rs`, `src/main.rs` — `sys-resolver doctor` / `sys-resolver resolve <path>` / `env` / `set` / `get`.
+- `src/toolchain.rs` — which libc programs are built for (musl or glibc).
 - `src/ffi.rs` — C ABI export.
 - `build-so.sh`, `exports.map` — link `libsys_resolver.so`.
 
@@ -21,6 +22,14 @@ No mount, no symlink, no kernel patch, no libc rebuild, no editing scripts/binar
 - Prebuilt programs whose loader isn't on this system (`/lib64/ld-linux-x86-64.so.2`, `/lib/ld-musl-x86_64.so.1`) are started through this system's copy of it, the same ways: glibc's loader in its own directory (`/overlayer/zexlib/union/x86_64-zainium-linux-gnu/lib`), musl's in the base. Such a program sees the loader as `/proc/self/exe`.
 - Deleting under `/overlayer/syshub` is refused only for files of the base itself, and only for programs other than zex. `var/`, `etc/` and everything in the userland layer (`zexlib/union`) can be deleted by anyone. A safety net against a stray `rm -rf`, not a security boundary.
 - The library has no libc of its own: its libc calls bind to the libc of the program it is loaded into, so it works the same in musl and glibc programs, and a glibc program never gets musl loaded next to glibc.
+
+## Building for glibc
+
+glibc (the `glibc` package) lives in its own directory, `/overlayer/zexlib/union/x86_64-zainium-linux-gnu`, with its compiler `x86_64-zainium-linux-gnu-gcc`/`-g++` (`glibc-toolchain`). Plain `gcc` builds for musl.
+
+- `eval "$(sys-resolver env glibc)"` — for one shell or a ZEXBUILD: `CC`, `CXX`, `CPP` and `CHOST` for glibc, `PKG_CONFIG_LIBDIR` at glibc's `.pc` files, the Rust linker for the gnu target, and no musl `LDFLAGS`. `sys-resolver env musl` goes back; it names musl's compilers in full (`x86_64-zainium-linux-musl-gcc`).
+- `elevate sys-resolver set glibc` — for the whole system: `gcc`, `cc`, `g++`, `c++` and `cpp` start glibc's compiler and `pkg-config` sees only glibc's libraries (done by the exec hooks). `elevate sys-resolver set musl` goes back; `sys-resolver get` shows which one builds use. `ZAINIUM_LIBC=musl|glibc` overrides the setting for one environment.
+- Only building changes: every program keeps running with the libc it was linked against. musl's compiler stays reachable as `x86_64-zainium-linux-musl-gcc`.
 
 ## Not covered
 
@@ -35,7 +44,7 @@ cargo test --release
 ./build-so.sh        # writes target/libsys_resolver.so; CC=x86_64-zainium-linux-musl-gcc on Zainium
 ```
 
-`build-so.sh` links with `-nostdlib`: no `NEEDED` entry at all (it fails if one appears), only the hooks exported, the unwinder linked in statically.
+`build-so.sh` builds with the `preload` feature (the hooks; the `sys-resolver` program is built without them) and links with `-nostdlib`: no `NEEDED` entry at all (it fails if one appears), only the hooks exported, the unwinder linked in statically.
 
 ## Deployed
 

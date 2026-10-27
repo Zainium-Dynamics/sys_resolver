@@ -17,6 +17,8 @@
 //! The same goes for a program's own check before it runs something: GNU make (gnulib's
 //! `find_in_given_path`) tests its `/bin/sh` with `eaccess()`, which in musl calls the internal
 //! `faccessat`, so `eaccess`/`euidaccess` are hooked too.
+//! With glibc picked for building (`sys-resolver set glibc`, or `ZAINIUM_LIBC=glibc`), the
+//! base's compiler drivers start glibc's and pkg-config sees only glibc's libraries.
 //! A prebuilt program whose loader isn't on this system (`/lib64/ld-linux-x86-64.so.2`,
 //! `/lib/ld-musl-x86_64.so.1`) is started through this system's copy of it, given the program.
 //! Not covered: static and setuid programs (the loader preloads nothing into them), and the
@@ -34,6 +36,7 @@
 
 use crate::nss;
 use crate::remap::{self, Roots};
+use crate::toolchain::{self, Libc};
 use libc::{c_char, c_int, c_void};
 use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
@@ -867,16 +870,135 @@ unsafe fn exists(path: *const c_char) -> bool {
     }
 }
 
-/// What to run instead of what the caller asked for. Owns the strings `argv` points into.
+/// What to run instead of what the caller asked for. Owns the strings `argv` and `envp`
+/// point into.
 struct Exec {
     file: CString,
     _keep: Vec<CString>,
     argv: Option<Vec<*const c_char>>,
+    envp: Option<Vec<*const c_char>>,
 }
 
 impl Exec {
     fn argv(&self, original: *const *const c_char) -> *const *const c_char {
         self.argv.as_ref().map_or(original, |v| v.as_ptr())
+    }
+
+    fn envp(&self, original: *const *const c_char) -> *const *const c_char {
+        self.envp.as_ref().map_or(original, |v| v.as_ptr())
+    }
+}
+
+/// `argv[1..]` after `first`, NULL-terminated.
+unsafe fn with_args(first: Vec<*const c_char>, argv: *const *const c_char) -> Vec<*const c_char> {
+    unsafe {
+        let mut v = first;
+        if !argv.is_null() && !(*argv).is_null() {
+            let mut i = 1;
+            while !(*argv.add(i)).is_null() {
+                v.push(*argv.add(i));
+                i += 1;
+            }
+        }
+        v.push(std::ptr::null());
+        v
+    }
+}
+
+/// The value of `key` in `envp`.
+unsafe fn env_value<'a>(envp: *const *const c_char, key: &[u8]) -> Option<&'a [u8]> {
+    unsafe {
+        if envp.is_null() {
+            return None;
+        }
+        let mut i = 0;
+        while !(*envp.add(i)).is_null() {
+            let e = CStr::from_ptr(*envp.add(i)).to_bytes();
+            if e.len() > key.len() && e.starts_with(key) && e[key.len()] == b'=' {
+                return Some(&e[key.len() + 1..]);
+            }
+            i += 1;
+        }
+        None
+    }
+}
+
+/// Whether builds use glibc: `ZAINIUM_LIBC` in the new program's environment, else the
+/// system's setting (`sys-resolver set`), read into a stack buffer.
+unsafe fn glibc_picked(envp: *const *const c_char) -> bool {
+    unsafe {
+        if let Some(v) = env_value(envp, toolchain::ENV.as_bytes()) {
+            return std::str::from_utf8(v).ok().and_then(Libc::parse) == Some(Libc::Glibc);
+        }
+        static SETTING: OnceLock<Option<CString>> = OnceLock::new();
+        let Some(setting) = SETTING
+            .get_or_init(|| CString::new(toolchain::setting_path(roots()).as_os_str().as_bytes()).ok())
+        else {
+            return false;
+        };
+        let Some(open) = real().open else { return false };
+        let fd = open(setting.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0);
+        if fd < 0 {
+            return false;
+        }
+        let mut buf = [0u8; 16];
+        let n = libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len());
+        libc::close(fd);
+        n > 0
+            && std::str::from_utf8(&buf[..n as usize]).ok().and_then(Libc::parse) == Some(Libc::Glibc)
+    }
+}
+
+/// With glibc picked, the base's compiler drivers (`gcc`, `cc`, `g++`, `c++`, `cpp`) start
+/// glibc's, and pkg-config sees only glibc's `.pc` files. musl's compilers stay reachable by
+/// their full names (`x86_64-zainium-linux-musl-gcc`).
+unsafe fn toolchain_exec(
+    target: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> Option<Exec> {
+    unsafe {
+        let t = CStr::from_ptr(target).to_bytes();
+        let slash = t.iter().rposition(|&b| b == b'/')?;
+        let (dir, name) = (&t[..slash], &t[slash + 1..]);
+        let driver = toolchain::gnu_driver(name);
+        let pkg_config = name == b"pkg-config" || name == b"pkgconf";
+        if driver.is_none() && !pkg_config {
+            return None;
+        }
+        static BASE_BIN: OnceLock<PathBuf> = OnceLock::new();
+        let base_bin = BASE_BIN.get_or_init(|| roots().syshub.join("bin"));
+        if dir != base_bin.as_os_str().as_bytes() || !glibc_picked(envp) {
+            return None;
+        }
+        if let Some(d) = driver {
+            let gnu = roots().union.join(format!("bin/{}-{d}", toolchain::GNU));
+            let gnu = CString::new(gnu.as_os_str().as_bytes()).ok()?;
+            if !exists(gnu.as_ptr()) {
+                return None;
+            }
+            let v = with_args(vec![gnu.as_ptr()], argv);
+            return Some(Exec { file: gnu, _keep: Vec::new(), argv: Some(v), envp: None });
+        }
+        let libdir = CString::new(format!(
+            "PKG_CONFIG_LIBDIR={}",
+            toolchain::glibc_pkg_config_libdir(roots())
+        ))
+        .ok()?;
+        let mut e = Vec::new();
+        if !envp.is_null() {
+            let mut i = 0;
+            while !(*envp.add(i)).is_null() {
+                let s = CStr::from_ptr(*envp.add(i)).to_bytes();
+                if !s.starts_with(b"PKG_CONFIG_LIBDIR=") && !s.starts_with(b"PKG_CONFIG_PATH=") {
+                    e.push(*envp.add(i));
+                }
+                i += 1;
+            }
+        }
+        e.push(libdir.as_ptr());
+        e.push(std::ptr::null());
+        Some(Exec { file: CStr::from_ptr(target).to_owned(), _keep: vec![libdir], argv: None, envp: Some(e) })
     }
 }
 
@@ -959,8 +1081,13 @@ fn system_loader(interp: &[u8]) -> Option<CString> {
 /// Find where `path` really is and, for a script whose `#!` interpreter isn't where the line
 /// says (`#!/bin/sh`, `#!/usr/bin/env python3`) or a program whose loader isn't
 /// (`/lib64/ld-linux-x86-64.so.2`), the argv that starts it through the real one.
-/// `None` means run it unchanged. That common case allocates nothing.
-unsafe fn prepare_exec(path: *const c_char, argv: *const *const c_char) -> Option<Exec> {
+/// With glibc picked for building, the base's compiler drivers become glibc's (see
+/// [`toolchain_exec`]). `None` means run it unchanged. That common case allocates nothing.
+unsafe fn prepare_exec(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> Option<Exec> {
     unsafe {
         if path.is_null() {
             return None;
@@ -970,6 +1097,9 @@ unsafe fn prepare_exec(path: *const c_char, argv: *const *const c_char) -> Optio
             file = Some(candidate_cstrings(path).into_iter().find(|c| exists(c.as_ptr()))?);
         }
         let target = file.as_ref().map_or(path, |c| c.as_ptr());
+        if let Some(e) = toolchain_exec(target, argv, envp) {
+            return Some(e);
+        }
 
         let mut head = [0u8; SHEBANG_MAX];
         let mut n = 0isize;
@@ -992,16 +1122,8 @@ unsafe fn prepare_exec(path: *const c_char, argv: *const *const c_char) -> Optio
                     let has_argv = !argv.is_null() && !(*argv).is_null();
                     let argv0 = if has_argv { *argv } else { program.as_ptr() };
                     // what the kernel would have run: the loader, given the program
-                    let mut v = vec![loader.as_ptr(), c"--argv0".as_ptr(), argv0, program.as_ptr()];
-                    if has_argv {
-                        let mut i = 1;
-                        while !(*argv.add(i)).is_null() {
-                            v.push(*argv.add(i));
-                            i += 1;
-                        }
-                    }
-                    v.push(std::ptr::null());
-                    return Some(Exec { file: loader, _keep: vec![program], argv: Some(v) });
+                    let v = with_args(vec![loader.as_ptr(), c"--argv0".as_ptr(), argv0, program.as_ptr()], argv);
+                    return Some(Exec { file: loader, _keep: vec![program], argv: Some(v), envp: None });
                 }
             }
         }
@@ -1032,12 +1154,12 @@ unsafe fn prepare_exec(path: *const c_char, argv: *const *const c_char) -> Optio
                         v.push(std::ptr::null());
                         let mut keep = vec![script];
                         keep.extend(arg);
-                        return Some(Exec { file: real_interp, _keep: keep, argv: Some(v) });
+                        return Some(Exec { file: real_interp, _keep: keep, argv: Some(v), envp: None });
                     }
                 }
             }
         }
-        file.map(|file| Exec { file, _keep: Vec::new(), argv: None })
+        file.map(|file| Exec { file, _keep: Vec::new(), argv: None, envp: None })
     }
 }
 
@@ -1049,8 +1171,8 @@ pub unsafe extern "C" fn execve(
 ) -> c_int {
     unsafe {
         let Some(real) = real().execve else { return missing(-1) };
-        match prepare_exec(path, argv) {
-            Some(e) => real(e.file.as_ptr(), e.argv(argv), envp),
+        match prepare_exec(path, argv, envp) {
+            Some(e) => real(e.file.as_ptr(), e.argv(argv), e.envp(envp)),
             None => real(path, argv, envp),
         }
     }
@@ -1069,8 +1191,8 @@ pub unsafe extern "C" fn execveat(
     unsafe {
         let Some(real) = real().execveat else { return missing(-1) };
         let fhs_form = !path.is_null() && (*path == b'/' as c_char || dirfd == libc::AT_FDCWD);
-        match if fhs_form { prepare_exec(path, argv) } else { None } {
-            Some(e) => real(dirfd, e.file.as_ptr(), e.argv(argv), envp, flags),
+        match if fhs_form { prepare_exec(path, argv, envp) } else { None } {
+            Some(e) => real(dirfd, e.file.as_ptr(), e.argv(argv), e.envp(envp), flags),
             None => real(dirfd, path, argv, envp, flags),
         }
     }
@@ -1161,8 +1283,8 @@ pub unsafe extern "C" fn posix_spawn(
 ) -> c_int {
     unsafe {
         let Some(real) = real().posix_spawn else { return libc::ENOSYS };
-        match prepare_exec(path, argv) {
-            Some(e) => real(pid, e.file.as_ptr(), actions, attr, e.argv(argv), envp),
+        match prepare_exec(path, argv, envp) {
+            Some(e) => real(pid, e.file.as_ptr(), actions, attr, e.argv(argv), e.envp(envp)),
             None => real(pid, path, actions, attr, argv, envp),
         }
     }
@@ -1193,16 +1315,16 @@ pub unsafe extern "C" fn posix_spawnp(
         for_each_on_path(name, |cand| {
             let Some(access) = real().access else { return true };
             if access(cand, libc::X_OK) == 0 {
-                fixed = prepare_exec(cand, argv);
+                fixed = prepare_exec(cand, argv, envp);
                 return true;
             }
             if errno() == libc::ENOENT {
-                fixed = prepare_exec(cand, argv);
+                fixed = prepare_exec(cand, argv, envp);
             }
             fixed.is_some()
         });
         match fixed {
-            Some(e) => spawn(pid, e.file.as_ptr(), actions, attr, e.argv(argv), envp),
+            Some(e) => spawn(pid, e.file.as_ptr(), actions, attr, e.argv(argv), e.envp(envp)),
             None => spawnp(pid, file, actions, attr, argv, envp),
         }
     }

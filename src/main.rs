@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use sys_resolver::audit;
 use sys_resolver::remap::{self, Roots};
+use sys_resolver::toolchain::{self, Libc};
 
 /// sys_resolver — dynamic FHS-path resolution logic for ZainiumOS.
 #[derive(Parser)]
@@ -24,6 +25,21 @@ enum Command {
     },
     /// Audit the resolver against the real, live tree.
     Doctor,
+    /// Print the shell lines that build with a libc's toolchain:
+    /// eval "$(sys-resolver env glibc)". Without an argument, the system's setting.
+    Env {
+        /// musl or glibc
+        libc: Option<String>,
+    },
+    /// Pick the toolchain the system builds with: elevate sys-resolver set glibc|musl.
+    /// With glibc, gcc/cc/g++/c++/cpp start glibc's compiler and pkg-config sees glibc's
+    /// libraries; programs keep running with the libc they were linked against.
+    Set {
+        /// musl or glibc
+        libc: String,
+    },
+    /// Show which toolchain builds use, and why.
+    Get,
 }
 
 fn roots_for(cli: &Cli) -> Roots {
@@ -40,6 +56,9 @@ fn main() {
     match &cli.command {
         Command::Resolve { path } => cmd_resolve(path, &roots),
         Command::Doctor => cmd_doctor(&roots),
+        Command::Env { libc } => cmd_env(libc.as_deref(), &roots),
+        Command::Set { libc } => cmd_set(libc, &roots),
+        Command::Get => cmd_get(&roots),
     }
 }
 
@@ -60,6 +79,62 @@ fn cmd_resolve(path: &Path, roots: &Roots) {
             }
             std::process::exit(1);
         }
+    }
+}
+
+fn parse_libc(s: &str) -> Libc {
+    Libc::parse(s).unwrap_or_else(|| {
+        eprintln!("unknown libc '{s}': musl or glibc");
+        std::process::exit(2);
+    })
+}
+
+fn cmd_env(libc: Option<&str>, roots: &Roots) {
+    let libc = libc.map_or_else(|| toolchain::system_setting(roots), parse_libc);
+    if libc == Libc::Glibc && !toolchain::glibc_toolchain_installed(roots) {
+        eprintln!("the glibc toolchain is not installed: elevate zex install glibc-toolchain");
+        std::process::exit(1);
+    }
+    print!("{}", toolchain::env(roots, libc));
+}
+
+fn cmd_set(libc: &str, roots: &Roots) {
+    let libc = parse_libc(libc);
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("run it as root: elevate sys-resolver set {}", libc.name());
+        std::process::exit(1);
+    }
+    if libc == Libc::Glibc && !toolchain::glibc_toolchain_installed(roots) {
+        eprintln!("the glibc toolchain is not installed: elevate zex install glibc-toolchain");
+        std::process::exit(1);
+    }
+    let path = toolchain::setting_path(roots);
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&path, format!("{}\n", libc.name())));
+    if let Err(e) = written {
+        eprintln!("cannot write {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    match libc {
+        Libc::Glibc => println!(
+            "builds use glibc now: gcc, cc, g++, c++ and cpp start {g}-gcc/-g++, pkg-config sees\n\
+             only {dir}. Programs keep running with the libc they were linked against.\n\
+             musl's compiler stays {m}-gcc. Back to musl: elevate sys-resolver set musl",
+            g = toolchain::GNU,
+            m = toolchain::MUSL,
+            dir = toolchain::glibc_dir(roots).display()
+        ),
+        Libc::Musl => println!("builds use musl, the base's toolchain"),
+    }
+}
+
+fn cmd_get(roots: &Roots) {
+    let system = toolchain::system_setting(roots);
+    match std::env::var(toolchain::ENV).ok().as_deref().and_then(Libc::parse) {
+        Some(l) => println!("{} (from {} in this environment; the system's setting is {})", l.name(), toolchain::ENV, system.name()),
+        None => println!("{} (the system's setting)", system.name()),
     }
 }
 
