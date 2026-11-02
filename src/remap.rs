@@ -50,11 +50,14 @@ pub fn in_scope(path: &Path) -> bool {
         return false;
     }
     match comps.next() {
-        Some(Component::Normal(first)) => {
-            SCOPE_GUARD.contains(&first.to_string_lossy().as_ref())
-        }
+        Some(Component::Normal(first)) => SCOPE_GUARD.contains(&first.to_string_lossy().as_ref()),
         _ => false,
     }
+}
+
+/// `/bin`, `/usr`, `/etc`: a single in-scope name right under the root.
+pub fn is_top_level(path: &Path) -> bool {
+    in_scope(path) && path.components().count() == 2
 }
 
 /// `/usr/bin/foo` -> `bin/foo`, `/lib64/x` -> `lib/x`, `/bin/foo` unchanged.
@@ -143,7 +146,9 @@ mod tests {
         let got = resolve(Path::new("/usr/include/dav1d/dav1d.h"), &live_roots()).unwrap();
         assert_eq!(
             got,
-            Path::new("/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/zexlib/union/include/dav1d/dav1d.h")
+            Path::new(
+                "/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/zexlib/union/include/dav1d/dav1d.h"
+            )
         );
     }
 
@@ -158,7 +163,10 @@ mod tests {
     #[test]
     fn resolves_var_and_etc_under_syshub() {
         let roots = live_roots();
-        assert_eq!(resolve(Path::new("/var"), &roots), Some(roots.syshub.join("var")));
+        assert_eq!(
+            resolve(Path::new("/var"), &roots),
+            Some(roots.syshub.join("var"))
+        );
         assert_eq!(
             resolve(Path::new("/etc/passwd"), &roots),
             Some(roots.syshub.join("etc/passwd"))

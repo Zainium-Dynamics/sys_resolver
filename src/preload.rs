@@ -334,6 +334,25 @@ unsafe fn with_fallback<T>(
     }
 }
 
+/// The stat family never remaps a bare top-level name: `/bin` or `/usr` answered from the base
+/// makes a sandbox tool (flatpak) believe the root has them and ask bwrap to bind what is not there.
+unsafe fn with_fallback_stat<T>(
+    path: *const c_char,
+    failed: fn(&T) -> bool,
+    f: impl Fn(*const c_char) -> T,
+) -> T {
+    unsafe {
+        if !path.is_null()
+            && remap::is_top_level(Path::new(std::ffi::OsStr::from_bytes(
+                CStr::from_ptr(path).to_bytes(),
+            )))
+        {
+            return f(path);
+        }
+        with_fallback(path, failed, f)
+    }
+}
+
 fn neg_int(r: &c_int) -> bool {
     *r < 0
 }
@@ -439,7 +458,7 @@ pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
         let Some(real) = real().access else {
             return missing(-1);
         };
-        with_fallback(path, neg_int, |p| real(p, mode))
+        with_fallback_stat(path, neg_int, |p| real(p, mode))
     }
 }
 
@@ -454,7 +473,7 @@ pub unsafe extern "C" fn faccessat(
         let Some(real) = real().faccessat else {
             return missing(-1);
         };
-        with_fallback(path, neg_int, |p| real(dirfd, p, mode, flag))
+        with_fallback_stat(path, neg_int, |p| real(dirfd, p, mode, flag))
     }
 }
 
@@ -464,7 +483,7 @@ pub unsafe extern "C" fn eaccess(path: *const c_char, mode: c_int) -> c_int {
         let Some(real) = real().eaccess.or(real().euidaccess) else {
             return missing(-1);
         };
-        with_fallback(path, neg_int, |p| real(p, mode))
+        with_fallback_stat(path, neg_int, |p| real(p, mode))
     }
 }
 
@@ -474,7 +493,7 @@ pub unsafe extern "C" fn euidaccess(path: *const c_char, mode: c_int) -> c_int {
         let Some(real) = real().euidaccess.or(real().eaccess) else {
             return missing(-1);
         };
-        with_fallback(path, neg_int, |p| real(p, mode))
+        with_fallback_stat(path, neg_int, |p| real(p, mode))
     }
 }
 
@@ -523,7 +542,7 @@ pub unsafe extern "C" fn __openat64_2(dirfd: c_int, path: *const c_char, flags: 
 unsafe fn stat_with(real: Option<StatFn>, path: *const c_char, buf: *mut libc::stat) -> c_int {
     unsafe {
         let Some(real) = real else { return missing(-1) };
-        with_fallback(path, neg_int, |p| real(p, buf))
+        with_fallback_stat(path, neg_int, |p| real(p, buf))
     }
 }
 
@@ -556,7 +575,7 @@ unsafe fn fstatat_with(
 ) -> c_int {
     unsafe {
         let Some(real) = real else { return missing(-1) };
-        with_fallback(path, neg_int, |p| real(dirfd, p, buf, flag))
+        with_fallback_stat(path, neg_int, |p| real(dirfd, p, buf, flag))
     }
 }
 
@@ -592,7 +611,7 @@ pub unsafe extern "C" fn statx(
         let Some(real) = real().statx else {
             return missing(-1);
         };
-        with_fallback(path, neg_int, |p| real(dirfd, p, flags, mask, buf))
+        with_fallback_stat(path, neg_int, |p| real(dirfd, p, flags, mask, buf))
     }
 }
 
@@ -606,7 +625,7 @@ unsafe fn xstat_with(
 ) -> c_int {
     unsafe {
         let Some(real) = real else { return missing(-1) };
-        with_fallback(path, neg_int, |p| real(ver, p, buf))
+        with_fallback_stat(path, neg_int, |p| real(ver, p, buf))
     }
 }
 
@@ -644,7 +663,7 @@ unsafe fn fxstatat_with(
 ) -> c_int {
     unsafe {
         let Some(real) = real else { return missing(-1) };
-        with_fallback(path, neg_int, |p| real(ver, dirfd, p, buf, flag))
+        with_fallback_stat(path, neg_int, |p| real(ver, dirfd, p, buf, flag))
     }
 }
 
