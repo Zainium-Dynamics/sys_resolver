@@ -12,6 +12,9 @@
     ftw; ftw64; nftw; nftw64; pathconf; getxattr; lgetxattr; listxattr; llistxattr;
     execve; execveat; execv; execvp; execvpe; execl; execlp; execle; posix_spawn; posix_spawnp;
     unlink; unlinkat; rmdir;
+    mkdir; mkdirat; mkfifo; mknod; rename; renameat; renameat2; symlink; symlinkat; link;
+    chmod; fchmodat; chown; lchown; fchownat; utimensat; truncate;
+    setxattr; lsetxattr; removexattr; lremovexattr; bind; connect;
     getpwnam; getpwnam_r; getpwuid; getpwuid_r; getgrnam; getgrnam_r; getgrgid; getgrgid_r;
     sys_resolver_candidates;
   local: *;

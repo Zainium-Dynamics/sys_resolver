@@ -7,8 +7,10 @@
 //! canonicalize_file_name pathconf getxattr lgetxattr listxattr llistxattr inotify_add_watch chdir
 //! dlopen (+ the `*64` names, glibc's `__open_2`/`__openat_2` fortify entries and its old
 //! `__xstat` family), execve execv execvp execvpe execveat posix_spawn posix_spawnp (and execl
-//! execlp execle in `execl.c`), getpwnam getpwuid getgrnam getgrgid (+ `_r`), and unlink unlinkat rmdir
-//! (see [`refuses_delete`]).
+//! execlp execle in `execl.c`), getpwnam getpwuid getgrnam getgrgid (+ `_r`), unlink unlinkat rmdir
+//! (see [`refuses_delete`]), and the writes: mkdir mkdirat mkfifo mknod rename renameat renameat2
+//! symlink symlinkat link chmod fchmodat chown lchown fchownat utimensat truncate setxattr
+//! lsetxattr removexattr lremovexattr, and bind/connect for unix socket paths.
 //!
 //! musl calls its own functions directly, never through the PLT, so `execv`, `execvp` and
 //! `posix_spawn` (which Rust's `Command`, Python's `subprocess` and most launchers use) never
@@ -69,7 +71,8 @@ type AccessFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 type FaccessatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, c_int) -> c_int;
 type StatFn = unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int;
 type FstatatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
-type StatxFn = unsafe extern "C" fn(c_int, *const c_char, c_int, libc::c_uint, *mut c_void) -> c_int;
+type StatxFn =
+    unsafe extern "C" fn(c_int, *const c_char, c_int, libc::c_uint, *mut c_void) -> c_int;
 type FopenFn = unsafe extern "C" fn(*const c_char, *const c_char) -> *mut libc::FILE;
 type FreopenFn =
     unsafe extern "C" fn(*const c_char, *const c_char, *mut libc::FILE) -> *mut libc::FILE;
@@ -90,18 +93,25 @@ type SpawnFn = unsafe extern "C" fn(
 ) -> c_int;
 type UnlinkFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type XstatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat) -> c_int;
-type FxstatatFn = unsafe extern "C" fn(c_int, c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
+type FxstatatFn =
+    unsafe extern "C" fn(c_int, c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
 type StatfsFn = unsafe extern "C" fn(*const c_char, *mut c_void) -> c_int;
 type Open2Fn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 type Openat2Fn = unsafe extern "C" fn(c_int, *const c_char, c_int) -> c_int;
 type ReadlinkatFn = unsafe extern "C" fn(c_int, *const c_char, *mut c_char, usize) -> isize;
-type ScandirFn = unsafe extern "C" fn(*const c_char, *mut c_void, *const c_void, *const c_void) -> c_int;
+type ScandirFn =
+    unsafe extern "C" fn(*const c_char, *mut c_void, *const c_void, *const c_void) -> c_int;
 type CanonicalizeFn = unsafe extern "C" fn(*const c_char) -> *mut c_char;
 type InotifyAddFn = unsafe extern "C" fn(c_int, *const c_char, u32) -> c_int;
 type FtwFn = unsafe extern "C" fn(*const c_char, *const c_void, c_int) -> c_int;
 type NftwFn = unsafe extern "C" fn(*const c_char, *const c_void, c_int, c_int) -> c_int;
-type ExecveatFn =
-    unsafe extern "C" fn(c_int, *const c_char, *const *const c_char, *const *const c_char, c_int) -> c_int;
+type ExecveatFn = unsafe extern "C" fn(
+    c_int,
+    *const c_char,
+    *const *const c_char,
+    *const *const c_char,
+    c_int,
+) -> c_int;
 type PathconfFn = unsafe extern "C" fn(*const c_char, c_int) -> libc::c_long;
 type GetxattrFn = unsafe extern "C" fn(*const c_char, *const c_char, *mut c_void, usize) -> isize;
 type ListxattrFn = unsafe extern "C" fn(*const c_char, *mut c_char, usize) -> isize;
@@ -302,7 +312,11 @@ unsafe extern "C" fn init() {
 
 /// Call `f(path)`; on ENOENT retry it with each remapped candidate, keeping the first
 /// errno when none works. `failed` tells a failed return value from a good one.
-unsafe fn with_fallback<T>(path: *const c_char, failed: fn(&T) -> bool, f: impl Fn(*const c_char) -> T) -> T {
+unsafe fn with_fallback<T>(
+    path: *const c_char,
+    failed: fn(&T) -> bool,
+    f: impl Fn(*const c_char) -> T,
+) -> T {
     unsafe {
         let r = f(path);
         if !failed(&r) || errno() != libc::ENOENT {
@@ -354,7 +368,12 @@ unsafe fn candidate_cstrings(path: *const c_char) -> Vec<CString> {
 
 // ── Files ────────────────────────────────────────────────────────────────────
 
-unsafe fn open_with(real: Option<OpenFn>, path: *const c_char, flags: c_int, mode: libc::mode_t) -> c_int {
+unsafe fn open_with(
+    real: Option<OpenFn>,
+    path: *const c_char,
+    flags: c_int,
+    mode: libc::mode_t,
+) -> c_int {
     unsafe {
         let Some(real) = real else { return missing(-1) };
         with_fallback(path, neg_int, |p| real(p, flags, mode))
@@ -385,19 +404,31 @@ unsafe fn openat_with(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn openat(dirfd: c_int, path: *const c_char, flags: c_int, mode: libc::mode_t) -> c_int {
+pub unsafe extern "C" fn openat(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mode: libc::mode_t,
+) -> c_int {
     unsafe { openat_with(real().openat, dirfd, path, flags, mode) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn openat64(dirfd: c_int, path: *const c_char, flags: c_int, mode: libc::mode_t) -> c_int {
+pub unsafe extern "C" fn openat64(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mode: libc::mode_t,
+) -> c_int {
     unsafe { openat_with(real().openat64.or(real().openat), dirfd, path, flags, mode) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn creat(path: *const c_char, mode: libc::mode_t) -> c_int {
     unsafe {
-        let Some(real) = real().creat else { return missing(-1) };
+        let Some(real) = real().creat else {
+            return missing(-1);
+        };
         with_fallback(path, neg_int, |p| real(p, mode))
     }
 }
@@ -405,15 +436,24 @@ pub unsafe extern "C" fn creat(path: *const c_char, mode: libc::mode_t) -> c_int
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
     unsafe {
-        let Some(real) = real().access else { return missing(-1) };
+        let Some(real) = real().access else {
+            return missing(-1);
+        };
         with_fallback(path, neg_int, |p| real(p, mode))
     }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn faccessat(dirfd: c_int, path: *const c_char, mode: c_int, flag: c_int) -> c_int {
+pub unsafe extern "C" fn faccessat(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: c_int,
+    flag: c_int,
+) -> c_int {
     unsafe {
-        let Some(real) = real().faccessat else { return missing(-1) };
+        let Some(real) = real().faccessat else {
+            return missing(-1);
+        };
         with_fallback(path, neg_int, |p| real(dirfd, p, mode, flag))
     }
 }
@@ -421,7 +461,9 @@ pub unsafe extern "C" fn faccessat(dirfd: c_int, path: *const c_char, mode: c_in
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eaccess(path: *const c_char, mode: c_int) -> c_int {
     unsafe {
-        let Some(real) = real().eaccess.or(real().euidaccess) else { return missing(-1) };
+        let Some(real) = real().eaccess.or(real().euidaccess) else {
+            return missing(-1);
+        };
         with_fallback(path, neg_int, |p| real(p, mode))
     }
 }
@@ -429,7 +471,9 @@ pub unsafe extern "C" fn eaccess(path: *const c_char, mode: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn euidaccess(path: *const c_char, mode: c_int) -> c_int {
     unsafe {
-        let Some(real) = real().euidaccess.or(real().eaccess) else { return missing(-1) };
+        let Some(real) = real().euidaccess.or(real().eaccess) else {
+            return missing(-1);
+        };
         with_fallback(path, neg_int, |p| real(p, mode))
     }
 }
@@ -439,7 +483,9 @@ pub unsafe extern "C" fn euidaccess(path: *const c_char, mode: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __open_2(path: *const c_char, flags: c_int) -> c_int {
     unsafe {
-        let Some(real) = real().open_2 else { return open(path, flags, 0) };
+        let Some(real) = real().open_2 else {
+            return open(path, flags, 0);
+        };
         with_fallback(path, neg_int, |p| real(p, flags))
     }
 }
@@ -447,7 +493,9 @@ pub unsafe extern "C" fn __open_2(path: *const c_char, flags: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __open64_2(path: *const c_char, flags: c_int) -> c_int {
     unsafe {
-        let Some(real) = real().open64_2.or(real().open_2) else { return open64(path, flags, 0) };
+        let Some(real) = real().open64_2.or(real().open_2) else {
+            return open64(path, flags, 0);
+        };
         with_fallback(path, neg_int, |p| real(p, flags))
     }
 }
@@ -455,7 +503,9 @@ pub unsafe extern "C" fn __open64_2(path: *const c_char, flags: c_int) -> c_int 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __openat_2(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int {
     unsafe {
-        let Some(real) = real().openat_2 else { return openat(dirfd, path, flags, 0) };
+        let Some(real) = real().openat_2 else {
+            return openat(dirfd, path, flags, 0);
+        };
         with_fallback(path, neg_int, |p| real(dirfd, p, flags))
     }
 }
@@ -511,12 +561,22 @@ unsafe fn fstatat_with(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fstatat(dirfd: c_int, path: *const c_char, buf: *mut libc::stat, flag: c_int) -> c_int {
+pub unsafe extern "C" fn fstatat(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+    flag: c_int,
+) -> c_int {
     unsafe { fstatat_with(real().fstatat, dirfd, path, buf, flag) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fstatat64(dirfd: c_int, path: *const c_char, buf: *mut libc::stat, flag: c_int) -> c_int {
+pub unsafe extern "C" fn fstatat64(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+    flag: c_int,
+) -> c_int {
     unsafe { fstatat_with(real().fstatat64.or(real().fstatat), dirfd, path, buf, flag) }
 }
 
@@ -529,14 +589,21 @@ pub unsafe extern "C" fn statx(
     buf: *mut c_void,
 ) -> c_int {
     unsafe {
-        let Some(real) = real().statx else { return missing(-1) };
+        let Some(real) = real().statx else {
+            return missing(-1);
+        };
         with_fallback(path, neg_int, |p| real(dirfd, p, flags, mask, buf))
     }
 }
 
 // glibc before 2.33 compiled `stat()` into calls to these
 
-unsafe fn xstat_with(real: Option<XstatFn>, ver: c_int, path: *const c_char, buf: *mut libc::stat) -> c_int {
+unsafe fn xstat_with(
+    real: Option<XstatFn>,
+    ver: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+) -> c_int {
     unsafe {
         let Some(real) = real else { return missing(-1) };
         with_fallback(path, neg_int, |p| real(ver, p, buf))
@@ -559,7 +626,11 @@ pub unsafe extern "C" fn __lxstat(ver: c_int, path: *const c_char, buf: *mut lib
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __lxstat64(ver: c_int, path: *const c_char, buf: *mut libc::stat) -> c_int {
+pub unsafe extern "C" fn __lxstat64(
+    ver: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+) -> c_int {
     unsafe { xstat_with(real().lxstat64.or(real().lxstat), ver, path, buf) }
 }
 
@@ -596,7 +667,16 @@ pub unsafe extern "C" fn __fxstatat64(
     buf: *mut libc::stat,
     flag: c_int,
 ) -> c_int {
-    unsafe { fxstatat_with(real().fxstatat64.or(real().fxstatat), ver, dirfd, path, buf, flag) }
+    unsafe {
+        fxstatat_with(
+            real().fxstatat64.or(real().fxstatat),
+            ver,
+            dirfd,
+            path,
+            buf,
+            flag,
+        )
+    }
 }
 
 unsafe fn statfs_with(real: Option<StatfsFn>, path: *const c_char, buf: *mut c_void) -> c_int {
@@ -626,9 +706,15 @@ pub unsafe extern "C" fn statvfs64(path: *const c_char, buf: *mut c_void) -> c_i
     unsafe { statfs_with(real().statvfs64.or(real().statvfs), path, buf) }
 }
 
-unsafe fn fopen_with(real: Option<FopenFn>, path: *const c_char, mode: *const c_char) -> *mut libc::FILE {
+unsafe fn fopen_with(
+    real: Option<FopenFn>,
+    path: *const c_char,
+    mode: *const c_char,
+) -> *mut libc::FILE {
     unsafe {
-        let Some(real) = real else { return missing(std::ptr::null_mut()) };
+        let Some(real) = real else {
+            return missing(std::ptr::null_mut());
+        };
         with_fallback(path, null_ptr, |p| real(p, mode))
     }
 }
@@ -668,11 +754,16 @@ unsafe fn freopen_with(
     stream: *mut libc::FILE,
 ) -> *mut libc::FILE {
     unsafe {
-        let Some(real) = real else { return missing(std::ptr::null_mut()) };
+        let Some(real) = real else {
+            return missing(std::ptr::null_mut());
+        };
         // freopen closes `stream` even when the open fails, so only one attempt is possible:
         // pick the path that exists first.
         if !path.is_null() && !exists(path) {
-            if let Some(cand) = candidate_cstrings(path).into_iter().find(|c| exists(c.as_ptr())) {
+            if let Some(cand) = candidate_cstrings(path)
+                .into_iter()
+                .find(|c| exists(c.as_ptr()))
+            {
                 return real(cand.as_ptr(), mode, stream);
             }
         }
@@ -683,7 +774,9 @@ unsafe fn freopen_with(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
     unsafe {
-        let Some(real) = real().opendir else { return missing(std::ptr::null_mut()) };
+        let Some(real) = real().opendir else {
+            return missing(std::ptr::null_mut());
+        };
         with_fallback(path, null_ptr, |p| real(p))
     }
 }
@@ -696,7 +789,9 @@ pub unsafe extern "C" fn scandir(
     compar: *const c_void,
 ) -> c_int {
     unsafe {
-        let Some(real) = real().scandir else { return missing(-1) };
+        let Some(real) = real().scandir else {
+            return missing(-1);
+        };
         with_fallback(path, neg_int, |p| real(p, namelist, filter, compar))
     }
 }
@@ -704,15 +799,24 @@ pub unsafe extern "C" fn scandir(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, size: usize) -> isize {
     unsafe {
-        let Some(real) = real().readlink else { return missing(-1) };
+        let Some(real) = real().readlink else {
+            return missing(-1);
+        };
         with_fallback(path, neg_isize, |p| real(p, buf, size))
     }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn readlinkat(dirfd: c_int, path: *const c_char, buf: *mut c_char, size: usize) -> isize {
+pub unsafe extern "C" fn readlinkat(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut c_char,
+    size: usize,
+) -> isize {
     unsafe {
-        let Some(real) = real().readlinkat else { return missing(-1) };
+        let Some(real) = real().readlinkat else {
+            return missing(-1);
+        };
         with_fallback(path, neg_isize, |p| real(dirfd, p, buf, size))
     }
 }
@@ -720,7 +824,9 @@ pub unsafe extern "C" fn readlinkat(dirfd: c_int, path: *const c_char, buf: *mut
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char {
     unsafe {
-        let Some(real) = real().realpath else { return missing(std::ptr::null_mut()) };
+        let Some(real) = real().realpath else {
+            return missing(std::ptr::null_mut());
+        };
         with_fallback(path, null_ptr, |p| real(p, resolved))
     }
 }
@@ -728,7 +834,9 @@ pub unsafe extern "C" fn realpath(path: *const c_char, resolved: *mut c_char) ->
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn canonicalize_file_name(path: *const c_char) -> *mut c_char {
     unsafe {
-        let Some(real) = real().canonicalize_file_name else { return realpath(path, std::ptr::null_mut()) };
+        let Some(real) = real().canonicalize_file_name else {
+            return realpath(path, std::ptr::null_mut());
+        };
         with_fallback(path, null_ptr, |p| real(p))
     }
 }
@@ -736,14 +844,21 @@ pub unsafe extern "C" fn canonicalize_file_name(path: *const c_char) -> *mut c_c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inotify_add_watch(fd: c_int, path: *const c_char, mask: u32) -> c_int {
     unsafe {
-        let Some(real) = real().inotify_add_watch else { return missing(-1) };
+        let Some(real) = real().inotify_add_watch else {
+            return missing(-1);
+        };
         with_fallback(path, neg_int, |p| real(fd, p, mask))
     }
 }
 
 // ftw/nftw walk the tree with libc's own opendir/stat, so only the starting point is ours
 
-unsafe fn ftw_with(real: Option<FtwFn>, path: *const c_char, f: *const c_void, fds: c_int) -> c_int {
+unsafe fn ftw_with(
+    real: Option<FtwFn>,
+    path: *const c_char,
+    f: *const c_void,
+    fds: c_int,
+) -> c_int {
     unsafe {
         let Some(real) = real else { return missing(-1) };
         with_fallback(path, neg_int, |p| real(p, f, fds))
@@ -774,19 +889,31 @@ unsafe fn nftw_with(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nftw(path: *const c_char, f: *const c_void, fds: c_int, flags: c_int) -> c_int {
+pub unsafe extern "C" fn nftw(
+    path: *const c_char,
+    f: *const c_void,
+    fds: c_int,
+    flags: c_int,
+) -> c_int {
     unsafe { nftw_with(real().nftw, path, f, fds, flags) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nftw64(path: *const c_char, f: *const c_void, fds: c_int, flags: c_int) -> c_int {
+pub unsafe extern "C" fn nftw64(
+    path: *const c_char,
+    f: *const c_void,
+    fds: c_int,
+    flags: c_int,
+) -> c_int {
     unsafe { nftw_with(real().nftw64.or(real().nftw), path, f, fds, flags) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pathconf(path: *const c_char, name: c_int) -> libc::c_long {
     unsafe {
-        let Some(real) = real().pathconf else { return missing(-1) };
+        let Some(real) = real().pathconf else {
+            return missing(-1);
+        };
         with_fallback(path, |r: &libc::c_long| *r < 0, |p| real(p, name))
     }
 }
@@ -805,16 +932,31 @@ unsafe fn getxattr_with(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getxattr(path: *const c_char, name: *const c_char, value: *mut c_void, size: usize) -> isize {
+pub unsafe extern "C" fn getxattr(
+    path: *const c_char,
+    name: *const c_char,
+    value: *mut c_void,
+    size: usize,
+) -> isize {
     unsafe { getxattr_with(real().getxattr, path, name, value, size) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lgetxattr(path: *const c_char, name: *const c_char, value: *mut c_void, size: usize) -> isize {
+pub unsafe extern "C" fn lgetxattr(
+    path: *const c_char,
+    name: *const c_char,
+    value: *mut c_void,
+    size: usize,
+) -> isize {
     unsafe { getxattr_with(real().lgetxattr, path, name, value, size) }
 }
 
-unsafe fn listxattr_with(real: Option<ListxattrFn>, path: *const c_char, list: *mut c_char, size: usize) -> isize {
+unsafe fn listxattr_with(
+    real: Option<ListxattrFn>,
+    path: *const c_char,
+    list: *mut c_char,
+    size: usize,
+) -> isize {
     unsafe {
         let Some(real) = real else { return missing(-1) };
         with_fallback(path, neg_isize, |p| real(p, list, size))
@@ -834,7 +976,9 @@ pub unsafe extern "C" fn llistxattr(path: *const c_char, list: *mut c_char, size
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chdir(path: *const c_char) -> c_int {
     unsafe {
-        let Some(real) = real().chdir else { return missing(-1) };
+        let Some(real) = real().chdir else {
+            return missing(-1);
+        };
         with_fallback(path, neg_int, |p| real(p))
     }
 }
@@ -842,7 +986,9 @@ pub unsafe extern "C" fn chdir(path: *const c_char) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dlopen(path: *const c_char, flags: c_int) -> *mut c_void {
     unsafe {
-        let Some(real) = real().dlopen else { return std::ptr::null_mut() };
+        let Some(real) = real().dlopen else {
+            return std::ptr::null_mut();
+        };
         let handle = real(path, flags);
         // dlopen reports failure through dlerror(), not errno: retry on any failure
         if !handle.is_null() || path.is_null() {
@@ -865,7 +1011,9 @@ const SHEBANG_MAX: usize = 256;
 
 unsafe fn exists(path: *const c_char) -> bool {
     unsafe {
-        let Some(access) = real().access else { return false };
+        let Some(access) = real().access else {
+            return false;
+        };
         access(path, libc::F_OK) == 0
     }
 }
@@ -931,12 +1079,14 @@ unsafe fn glibc_picked(envp: *const *const c_char) -> bool {
             return std::str::from_utf8(v).ok().and_then(Libc::parse) == Some(Libc::Glibc);
         }
         static SETTING: OnceLock<Option<CString>> = OnceLock::new();
-        let Some(setting) = SETTING
-            .get_or_init(|| CString::new(toolchain::setting_path(roots()).as_os_str().as_bytes()).ok())
-        else {
+        let Some(setting) = SETTING.get_or_init(|| {
+            CString::new(toolchain::setting_path(roots()).as_os_str().as_bytes()).ok()
+        }) else {
             return false;
         };
-        let Some(open) = real().open else { return false };
+        let Some(open) = real().open else {
+            return false;
+        };
         let fd = open(setting.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0);
         if fd < 0 {
             return false;
@@ -945,7 +1095,10 @@ unsafe fn glibc_picked(envp: *const *const c_char) -> bool {
         let n = libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len());
         libc::close(fd);
         n > 0
-            && std::str::from_utf8(&buf[..n as usize]).ok().and_then(Libc::parse) == Some(Libc::Glibc)
+            && std::str::from_utf8(&buf[..n as usize])
+                .ok()
+                .and_then(Libc::parse)
+                == Some(Libc::Glibc)
     }
 }
 
@@ -978,7 +1131,12 @@ unsafe fn toolchain_exec(
                 return None;
             }
             let v = with_args(vec![gnu.as_ptr()], argv);
-            return Some(Exec { file: gnu, _keep: Vec::new(), argv: Some(v), envp: None });
+            return Some(Exec {
+                file: gnu,
+                _keep: Vec::new(),
+                argv: Some(v),
+                envp: None,
+            });
         }
         let libdir = CString::new(format!(
             "PKG_CONFIG_LIBDIR={}",
@@ -998,7 +1156,12 @@ unsafe fn toolchain_exec(
         }
         e.push(libdir.as_ptr());
         e.push(std::ptr::null());
-        Some(Exec { file: CStr::from_ptr(target).to_owned(), _keep: vec![libdir], argv: None, envp: Some(e) })
+        Some(Exec {
+            file: CStr::from_ptr(target).to_owned(),
+            _keep: vec![libdir],
+            argv: None,
+            envp: Some(e),
+        })
     }
 }
 
@@ -1012,7 +1175,12 @@ fn parse_shebang(head: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
     let end = line.iter().position(blank).unwrap_or(line.len());
     let (interp, rest) = line.split_at(end);
     let rest = match rest.iter().position(|b| !blank(b)) {
-        Some(s) => &rest[s..rest.iter().rposition(|b| !blank(b)).map_or(rest.len(), |e| e + 1)],
+        Some(s) => {
+            &rest[s..rest
+                .iter()
+                .rposition(|b| !blank(b))
+                .map_or(rest.len(), |e| e + 1)]
+        }
         None => &rest[rest.len()..],
     };
     Some((interp, (!rest.is_empty()).then_some(rest)))
@@ -1025,7 +1193,12 @@ const PT_INTERP: u32 = 3;
 unsafe fn elf_interp(fd: c_int, buf: &mut [u8; libc::PATH_MAX as usize]) -> Option<usize> {
     unsafe {
         let read_at = |dst: &mut [u8], off: u64| {
-            libc::pread(fd, dst.as_mut_ptr() as *mut c_void, dst.len(), off as libc::off_t)
+            libc::pread(
+                fd,
+                dst.as_mut_ptr() as *mut c_void,
+                dst.len(),
+                off as libc::off_t,
+            )
         };
         let u16_at = |b: &[u8], i: usize| u16::from_le_bytes([b[i], b[i + 1]]) as u64;
         let u64_at = |b: &[u8], i: usize| {
@@ -1055,7 +1228,10 @@ unsafe fn elf_interp(fd: c_int, buf: &mut [u8; libc::PATH_MAX as usize]) -> Opti
             if n <= 0 {
                 return None;
             }
-            let len = buf[..n as usize].iter().position(|&b| b == 0).unwrap_or(n as usize);
+            let len = buf[..n as usize]
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(n as usize);
             buf[len] = 0;
             return Some(len);
         }
@@ -1075,7 +1251,12 @@ fn system_loader(interp: &[u8]) -> Option<CString> {
     } else {
         return None;
     };
-    CString::new(dir.join(std::ffi::OsStr::from_bytes(name)).as_os_str().as_bytes()).ok()
+    CString::new(
+        dir.join(std::ffi::OsStr::from_bytes(name))
+            .as_os_str()
+            .as_bytes(),
+    )
+    .ok()
 }
 
 /// Find where `path` really is and, for a script whose `#!` interpreter isn't where the line
@@ -1094,7 +1275,11 @@ unsafe fn prepare_exec(
         }
         let mut file: Option<CString> = None;
         if !exists(path) {
-            file = Some(candidate_cstrings(path).into_iter().find(|c| exists(c.as_ptr()))?);
+            file = Some(
+                candidate_cstrings(path)
+                    .into_iter()
+                    .find(|c| exists(c.as_ptr()))?,
+            );
         }
         let target = file.as_ref().map_or(path, |c| c.as_ptr());
         if let Some(e) = toolchain_exec(target, argv, envp) {
@@ -1106,7 +1291,11 @@ unsafe fn prepare_exec(
         let mut interp = [0u8; libc::PATH_MAX as usize];
         let mut interp_len = None;
         if let Some(open) = real().open {
-            let fd = open(target, libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK, 0);
+            let fd = open(
+                target,
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                0,
+            );
             if fd >= 0 {
                 n = libc::read(fd, head.as_mut_ptr() as *mut c_void, head.len());
                 if n >= 4 && head[..4] == *b"\x7fELF" {
@@ -1122,8 +1311,21 @@ unsafe fn prepare_exec(
                     let has_argv = !argv.is_null() && !(*argv).is_null();
                     let argv0 = if has_argv { *argv } else { program.as_ptr() };
                     // what the kernel would have run: the loader, given the program
-                    let v = with_args(vec![loader.as_ptr(), c"--argv0".as_ptr(), argv0, program.as_ptr()], argv);
-                    return Some(Exec { file: loader, _keep: vec![program], argv: Some(v), envp: None });
+                    let v = with_args(
+                        vec![
+                            loader.as_ptr(),
+                            c"--argv0".as_ptr(),
+                            argv0,
+                            program.as_ptr(),
+                        ],
+                        argv,
+                    );
+                    return Some(Exec {
+                        file: loader,
+                        _keep: vec![program],
+                        argv: Some(v),
+                        envp: None,
+                    });
                 }
             }
         }
@@ -1133,8 +1335,9 @@ unsafe fn prepare_exec(
                 name[..interp.len()].copy_from_slice(interp);
                 let name_ptr = name.as_ptr() as *const c_char;
                 if !exists(name_ptr) {
-                    if let Some(real_interp) =
-                        candidate_cstrings(name_ptr).into_iter().find(|c| exists(c.as_ptr()))
+                    if let Some(real_interp) = candidate_cstrings(name_ptr)
+                        .into_iter()
+                        .find(|c| exists(c.as_ptr()))
                     {
                         let script = file.unwrap_or_else(|| CStr::from_ptr(path).to_owned());
                         let arg = arg.and_then(|a| CString::new(a).ok());
@@ -1154,12 +1357,22 @@ unsafe fn prepare_exec(
                         v.push(std::ptr::null());
                         let mut keep = vec![script];
                         keep.extend(arg);
-                        return Some(Exec { file: real_interp, _keep: keep, argv: Some(v), envp: None });
+                        return Some(Exec {
+                            file: real_interp,
+                            _keep: keep,
+                            argv: Some(v),
+                            envp: None,
+                        });
                     }
                 }
             }
         }
-        file.map(|file| Exec { file, _keep: Vec::new(), argv: None, envp: None })
+        file.map(|file| Exec {
+            file,
+            _keep: Vec::new(),
+            argv: None,
+            envp: None,
+        })
     }
 }
 
@@ -1170,7 +1383,9 @@ pub unsafe extern "C" fn execve(
     envp: *const *const c_char,
 ) -> c_int {
     unsafe {
-        let Some(real) = real().execve else { return missing(-1) };
+        let Some(real) = real().execve else {
+            return missing(-1);
+        };
         match prepare_exec(path, argv, envp) {
             Some(e) => real(e.file.as_ptr(), e.argv(argv), e.envp(envp)),
             None => real(path, argv, envp),
@@ -1189,9 +1404,15 @@ pub unsafe extern "C" fn execveat(
     flags: c_int,
 ) -> c_int {
     unsafe {
-        let Some(real) = real().execveat else { return missing(-1) };
+        let Some(real) = real().execveat else {
+            return missing(-1);
+        };
         let fhs_form = !path.is_null() && (*path == b'/' as c_char || dirfd == libc::AT_FDCWD);
-        match if fhs_form { prepare_exec(path, argv, envp) } else { None } {
+        match if fhs_form {
+            prepare_exec(path, argv, envp)
+        } else {
+            None
+        } {
             Some(e) => real(dirfd, e.file.as_ptr(), e.argv(argv), e.envp(envp), flags),
             None => real(dirfd, path, argv, envp, flags),
         }
@@ -1282,9 +1503,18 @@ pub unsafe extern "C" fn posix_spawn(
     envp: *const *const c_char,
 ) -> c_int {
     unsafe {
-        let Some(real) = real().posix_spawn else { return libc::ENOSYS };
+        let Some(real) = real().posix_spawn else {
+            return libc::ENOSYS;
+        };
         match prepare_exec(path, argv, envp) {
-            Some(e) => real(pid, e.file.as_ptr(), actions, attr, e.argv(argv), e.envp(envp)),
+            Some(e) => real(
+                pid,
+                e.file.as_ptr(),
+                actions,
+                attr,
+                e.argv(argv),
+                e.envp(envp),
+            ),
             None => real(pid, path, actions, attr, argv, envp),
         }
     }
@@ -1300,8 +1530,12 @@ pub unsafe extern "C" fn posix_spawnp(
     envp: *const *const c_char,
 ) -> c_int {
     unsafe {
-        let Some(spawnp) = real().posix_spawnp else { return libc::ENOSYS };
-        let Some(spawn) = real().posix_spawn else { return libc::ENOSYS };
+        let Some(spawnp) = real().posix_spawnp else {
+            return libc::ENOSYS;
+        };
+        let Some(spawn) = real().posix_spawn else {
+            return libc::ENOSYS;
+        };
         if file.is_null() {
             return spawnp(pid, file, actions, attr, argv, envp);
         }
@@ -1313,7 +1547,9 @@ pub unsafe extern "C" fn posix_spawnp(
         // interpreter needs remapping, or sits in a remapped PATH dir, start the fixed form
         let mut fixed: Option<Exec> = None;
         for_each_on_path(name, |cand| {
-            let Some(access) = real().access else { return true };
+            let Some(access) = real().access else {
+                return true;
+            };
             if access(cand, libc::X_OK) == 0 {
                 fixed = prepare_exec(cand, argv, envp);
                 return true;
@@ -1324,7 +1560,14 @@ pub unsafe extern "C" fn posix_spawnp(
             fixed.is_some()
         });
         match fixed {
-            Some(e) => spawn(pid, e.file.as_ptr(), actions, attr, e.argv(argv), e.envp(envp)),
+            Some(e) => spawn(
+                pid,
+                e.file.as_ptr(),
+                actions,
+                attr,
+                e.argv(argv),
+                e.envp(envp),
+            ),
             None => spawnp(pid, file, actions, attr, argv, envp),
         }
     }
@@ -1402,6 +1645,30 @@ unsafe fn refuses(dirfd: c_int, path: *const c_char) -> bool {
     }
 }
 
+/// `f(path)`; on ENOENT again at the remapped path, which [`refuses_delete`] guards the same way.
+unsafe fn remove_fallback(
+    dirfd: c_int,
+    path: *const c_char,
+    f: impl Fn(*const c_char) -> c_int,
+) -> c_int {
+    unsafe {
+        let r = f(path);
+        if r == 0 || errno() != libc::ENOENT {
+            return r;
+        }
+        let first = errno();
+        let Some(c) = existing_target(path) else {
+            set_errno(first);
+            return r;
+        };
+        if refuses(dirfd, c.as_ptr()) {
+            set_errno(libc::EPERM);
+            return -1;
+        }
+        f(c.as_ptr())
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     unsafe {
@@ -1409,8 +1676,10 @@ pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
             set_errno(libc::EPERM);
             return -1;
         }
-        let Some(real) = real().unlink else { return missing(-1) };
-        real(path)
+        let Some(real) = real().unlink else {
+            return missing(-1);
+        };
+        remove_fallback(libc::AT_FDCWD, path, |p| real(p))
     }
 }
 
@@ -1421,8 +1690,10 @@ pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
             set_errno(libc::EPERM);
             return -1;
         }
-        let Some(real) = real().rmdir else { return missing(-1) };
-        real(path)
+        let Some(real) = real().rmdir else {
+            return missing(-1);
+        };
+        remove_fallback(libc::AT_FDCWD, path, |p| real(p))
     }
 }
 
@@ -1433,8 +1704,10 @@ pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_in
             set_errno(libc::EPERM);
             return -1;
         }
-        let Some(real) = real().unlinkat else { return missing(-1) };
-        real(dirfd, path, flags)
+        let Some(real) = real().unlinkat else {
+            return missing(-1);
+        };
+        remove_fallback(dirfd, path, |p| real(dirfd, p, flags))
     }
 }
 
@@ -1449,7 +1722,9 @@ pub unsafe extern "C" fn getpwnam_r(
     result: *mut *mut libc::passwd,
 ) -> c_int {
     unsafe {
-        let Some(real) = real().getpwnam_r else { return libc::ENOSYS };
+        let Some(real) = real().getpwnam_r else {
+            return libc::ENOSYS;
+        };
         let rc = real(name, pwd, buf, buflen, result);
         if rc == 0 && !(*result).is_null() {
             return rc;
@@ -1482,7 +1757,9 @@ pub unsafe extern "C" fn getpwuid_r(
     result: *mut *mut libc::passwd,
 ) -> c_int {
     unsafe {
-        let Some(real) = real().getpwuid_r else { return libc::ENOSYS };
+        let Some(real) = real().getpwuid_r else {
+            return libc::ENOSYS;
+        };
         let rc = real(uid, pwd, buf, buflen, result);
         if rc == 0 && !(*result).is_null() {
             return rc;
@@ -1512,7 +1789,9 @@ pub unsafe extern "C" fn getgrnam_r(
     result: *mut *mut libc::group,
 ) -> c_int {
     unsafe {
-        let Some(real) = real().getgrnam_r else { return libc::ENOSYS };
+        let Some(real) = real().getgrnam_r else {
+            return libc::ENOSYS;
+        };
         let rc = real(name, grp, buf, buflen, result);
         if rc == 0 && !(*result).is_null() {
             return rc;
@@ -1545,7 +1824,9 @@ pub unsafe extern "C" fn getgrgid_r(
     result: *mut *mut libc::group,
 ) -> c_int {
     unsafe {
-        let Some(real) = real().getgrgid_r else { return libc::ENOSYS };
+        let Some(real) = real().getgrgid_r else {
+            return libc::ENOSYS;
+        };
         let rc = real(gid, grp, buf, buflen, result);
         if rc == 0 && !(*result).is_null() {
             return rc;
@@ -1587,8 +1868,18 @@ pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut libc::passwd {
             let mut b = cell.borrow_mut();
             let (pwd, buf) = &mut *b;
             let mut result: *mut libc::passwd = std::ptr::null_mut();
-            let rc = getpwnam_r(name, pwd as *mut _, buf.as_mut_ptr(), buf.len(), &mut result);
-            if rc == 0 { result } else { std::ptr::null_mut() }
+            let rc = getpwnam_r(
+                name,
+                pwd as *mut _,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            );
+            if rc == 0 {
+                result
+            } else {
+                std::ptr::null_mut()
+            }
         })
     }
 }
@@ -1601,7 +1892,11 @@ pub unsafe extern "C" fn getpwuid(uid: libc::uid_t) -> *mut libc::passwd {
             let (pwd, buf) = &mut *b;
             let mut result: *mut libc::passwd = std::ptr::null_mut();
             let rc = getpwuid_r(uid, pwd as *mut _, buf.as_mut_ptr(), buf.len(), &mut result);
-            if rc == 0 { result } else { std::ptr::null_mut() }
+            if rc == 0 {
+                result
+            } else {
+                std::ptr::null_mut()
+            }
         })
     }
 }
@@ -1613,8 +1908,18 @@ pub unsafe extern "C" fn getgrnam(name: *const c_char) -> *mut libc::group {
             let mut b = cell.borrow_mut();
             let (grp, buf) = &mut *b;
             let mut result: *mut libc::group = std::ptr::null_mut();
-            let rc = getgrnam_r(name, grp as *mut _, buf.as_mut_ptr(), buf.len(), &mut result);
-            if rc == 0 { result } else { std::ptr::null_mut() }
+            let rc = getgrnam_r(
+                name,
+                grp as *mut _,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            );
+            if rc == 0 {
+                result
+            } else {
+                std::ptr::null_mut()
+            }
         })
     }
 }
@@ -1627,7 +1932,11 @@ pub unsafe extern "C" fn getgrgid(gid: libc::gid_t) -> *mut libc::group {
             let (grp, buf) = &mut *b;
             let mut result: *mut libc::group = std::ptr::null_mut();
             let rc = getgrgid_r(gid, grp as *mut _, buf.as_mut_ptr(), buf.len(), &mut result);
-            if rc == 0 { result } else { std::ptr::null_mut() }
+            if rc == 0 {
+                result
+            } else {
+                std::ptr::null_mut()
+            }
         })
     }
 }
@@ -1638,7 +1947,10 @@ mod tests {
 
     #[test]
     fn shebang_split_matches_the_kernel() {
-        assert_eq!(parse_shebang(b"#!/bin/sh\necho"), Some((&b"/bin/sh"[..], None)));
+        assert_eq!(
+            parse_shebang(b"#!/bin/sh\necho"),
+            Some((&b"/bin/sh"[..], None))
+        );
         assert_eq!(
             parse_shebang(b"#! /usr/bin/env  python3 \r\nx"),
             Some((&b"/usr/bin/env"[..], Some(&b"python3"[..])))
@@ -1657,5 +1969,485 @@ mod tests {
             lexical(Path::new("/overlayer/syshub/var/../bin/ls")),
             Path::new("/overlayer/syshub/bin/ls")
         );
+    }
+}
+
+// ── Writes ───────────────────────────────────────────────────────────────────
+//
+// A path that only exists under the base (`/var/lib/x` is `/overlayer/syshub/var/lib/x`) is
+// created, moved, linked and changed there too, so nothing needs /var or /etc at the root.
+
+type MkdirFn = unsafe extern "C" fn(*const c_char, libc::mode_t) -> c_int;
+type MkdiratFn = unsafe extern "C" fn(c_int, *const c_char, libc::mode_t) -> c_int;
+type MknodFn = unsafe extern "C" fn(*const c_char, libc::mode_t, libc::dev_t) -> c_int;
+type TwoPathFn = unsafe extern "C" fn(*const c_char, *const c_char) -> c_int;
+type RenameatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, *const c_char) -> c_int;
+type Renameat2Fn =
+    unsafe extern "C" fn(c_int, *const c_char, c_int, *const c_char, libc::c_uint) -> c_int;
+type SymlinkatFn = unsafe extern "C" fn(*const c_char, c_int, *const c_char) -> c_int;
+type ChmodFn = unsafe extern "C" fn(*const c_char, libc::mode_t) -> c_int;
+type FchmodatFn = unsafe extern "C" fn(c_int, *const c_char, libc::mode_t, c_int) -> c_int;
+type ChownFn = unsafe extern "C" fn(*const c_char, libc::uid_t, libc::gid_t) -> c_int;
+type FchownatFn =
+    unsafe extern "C" fn(c_int, *const c_char, libc::uid_t, libc::gid_t, c_int) -> c_int;
+type UtimensatFn =
+    unsafe extern "C" fn(c_int, *const c_char, *const libc::timespec, c_int) -> c_int;
+type TruncateFn = unsafe extern "C" fn(*const c_char, libc::off_t) -> c_int;
+type SetxattrFn =
+    unsafe extern "C" fn(*const c_char, *const c_char, *const c_void, usize, c_int) -> c_int;
+type RemovexattrFn = unsafe extern "C" fn(*const c_char, *const c_char) -> c_int;
+type SockFn = unsafe extern "C" fn(c_int, *const libc::sockaddr, libc::socklen_t) -> c_int;
+
+struct RealWrite {
+    mkdir: Option<MkdirFn>,
+    mkdirat: Option<MkdiratFn>,
+    mkfifo: Option<ChmodFn>,
+    mknod: Option<MknodFn>,
+    rename: Option<TwoPathFn>,
+    renameat: Option<RenameatFn>,
+    renameat2: Option<Renameat2Fn>,
+    symlink: Option<TwoPathFn>,
+    symlinkat: Option<SymlinkatFn>,
+    link: Option<TwoPathFn>,
+    chmod: Option<ChmodFn>,
+    fchmodat: Option<FchmodatFn>,
+    chown: Option<ChownFn>,
+    lchown: Option<ChownFn>,
+    fchownat: Option<FchownatFn>,
+    utimensat: Option<UtimensatFn>,
+    truncate: Option<TruncateFn>,
+    setxattr: Option<SetxattrFn>,
+    lsetxattr: Option<SetxattrFn>,
+    removexattr: Option<RemovexattrFn>,
+    lremovexattr: Option<RemovexattrFn>,
+    bind: Option<SockFn>,
+    connect: Option<SockFn>,
+}
+
+fn real_write() -> &'static RealWrite {
+    static REAL: OnceLock<RealWrite> = OnceLock::new();
+    REAL.get_or_init(|| unsafe {
+        RealWrite {
+            mkdir: next(c"mkdir"),
+            mkdirat: next(c"mkdirat"),
+            mkfifo: next(c"mkfifo"),
+            mknod: next(c"mknod"),
+            rename: next(c"rename"),
+            renameat: next(c"renameat"),
+            renameat2: next(c"renameat2"),
+            symlink: next(c"symlink"),
+            symlinkat: next(c"symlinkat"),
+            link: next(c"link"),
+            chmod: next(c"chmod"),
+            fchmodat: next(c"fchmodat"),
+            chown: next(c"chown"),
+            lchown: next(c"lchown"),
+            fchownat: next(c"fchownat"),
+            utimensat: next(c"utimensat"),
+            truncate: next(c"truncate"),
+            setxattr: next(c"setxattr"),
+            lsetxattr: next(c"lsetxattr"),
+            removexattr: next(c"removexattr"),
+            lremovexattr: next(c"lremovexattr"),
+            bind: next(c"bind"),
+            connect: next(c"connect"),
+        }
+    })
+}
+
+#[used]
+#[unsafe(link_section = ".init_array")]
+static INIT_WRITE: unsafe extern "C" fn() = init_write;
+
+unsafe extern "C" fn init_write() {
+    real_write();
+}
+
+/// Where a new entry at `path` goes: the first remapped candidate whose directory exists.
+unsafe fn create_target(path: *const c_char) -> Option<CString> {
+    unsafe {
+        candidate_cstrings(path).into_iter().find(|c| {
+            Path::new(std::ffi::OsStr::from_bytes(c.as_bytes()))
+                .parent()
+                .is_some_and(|d| d.is_dir())
+        })
+    }
+}
+
+/// The remapped candidate of `path` that exists.
+unsafe fn existing_target(path: *const c_char) -> Option<CString> {
+    unsafe {
+        candidate_cstrings(path)
+            .into_iter()
+            .find(|c| std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(c.as_bytes())).is_ok())
+    }
+}
+
+/// `f(old, new)`; on ENOENT again with `old` at where it exists and `new` where it can be made.
+unsafe fn two_paths(
+    old: *const c_char,
+    new: *const c_char,
+    old_exists: bool,
+    f: impl Fn(*const c_char, *const c_char) -> c_int,
+) -> c_int {
+    unsafe {
+        let r = f(old, new);
+        if r == 0 || errno() != libc::ENOENT {
+            return r;
+        }
+        let first = errno();
+        let o = if old_exists {
+            existing_target(old)
+        } else {
+            None
+        };
+        let n = create_target(new);
+        if o.is_none() && n.is_none() {
+            set_errno(first);
+            return r;
+        }
+        let r2 = f(
+            o.as_ref().map_or(old, |c| c.as_ptr()),
+            n.as_ref().map_or(new, |c| c.as_ptr()),
+        );
+        if r2 != 0 && errno() == libc::ENOENT {
+            set_errno(first);
+        }
+        r2
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkdir(path: *const c_char, mode: libc::mode_t) -> c_int {
+    unsafe {
+        let Some(real) = real_write().mkdir else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, mode))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: libc::mode_t) -> c_int {
+    unsafe {
+        let Some(real) = real_write().mkdirat else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(dirfd, p, mode))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkfifo(path: *const c_char, mode: libc::mode_t) -> c_int {
+    unsafe {
+        let Some(real) = real_write().mkfifo else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, mode))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mknod(path: *const c_char, mode: libc::mode_t, dev: libc::dev_t) -> c_int {
+    unsafe {
+        let Some(real) = real_write().mknod else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, mode, dev))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rename(old: *const c_char, new: *const c_char) -> c_int {
+    unsafe {
+        let Some(real) = real_write().rename else {
+            return missing(-1);
+        };
+        two_paths(old, new, true, |o, n| real(o, n))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn renameat(
+    olddir: c_int,
+    old: *const c_char,
+    newdir: c_int,
+    new: *const c_char,
+) -> c_int {
+    unsafe {
+        let Some(real) = real_write().renameat else {
+            return missing(-1);
+        };
+        two_paths(old, new, true, |o, n| real(olddir, o, newdir, n))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn renameat2(
+    olddir: c_int,
+    old: *const c_char,
+    newdir: c_int,
+    new: *const c_char,
+    flags: libc::c_uint,
+) -> c_int {
+    unsafe {
+        let Some(real) = real_write().renameat2 else {
+            return missing(-1);
+        };
+        two_paths(old, new, true, |o, n| real(olddir, o, newdir, n, flags))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn symlink(target: *const c_char, path: *const c_char) -> c_int {
+    unsafe {
+        let Some(real) = real_write().symlink else {
+            return missing(-1);
+        };
+        // the link's own contents are stored as given, only where it is made moves
+        two_paths(target, path, false, |t, p| real(t, p))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn symlinkat(
+    target: *const c_char,
+    dirfd: c_int,
+    path: *const c_char,
+) -> c_int {
+    unsafe {
+        let Some(real) = real_write().symlinkat else {
+            return missing(-1);
+        };
+        two_paths(target, path, false, |t, p| real(t, dirfd, p))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn link(old: *const c_char, new: *const c_char) -> c_int {
+    unsafe {
+        let Some(real) = real_write().link else {
+            return missing(-1);
+        };
+        two_paths(old, new, true, |o, n| real(o, n))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chmod(path: *const c_char, mode: libc::mode_t) -> c_int {
+    unsafe {
+        let Some(real) = real_write().chmod else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, mode))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fchmodat(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: libc::mode_t,
+    flags: c_int,
+) -> c_int {
+    unsafe {
+        let Some(real) = real_write().fchmodat else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(dirfd, p, mode, flags))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chown(path: *const c_char, uid: libc::uid_t, gid: libc::gid_t) -> c_int {
+    unsafe {
+        let Some(real) = real_write().chown else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, uid, gid))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lchown(path: *const c_char, uid: libc::uid_t, gid: libc::gid_t) -> c_int {
+    unsafe {
+        let Some(real) = real_write().lchown else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, uid, gid))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fchownat(
+    dirfd: c_int,
+    path: *const c_char,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    flags: c_int,
+) -> c_int {
+    unsafe {
+        let Some(real) = real_write().fchownat else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(dirfd, p, uid, gid, flags))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn utimensat(
+    dirfd: c_int,
+    path: *const c_char,
+    times: *const libc::timespec,
+    flags: c_int,
+) -> c_int {
+    unsafe {
+        let Some(real) = real_write().utimensat else {
+            return missing(-1);
+        };
+        // a null path means the descriptor itself (futimens)
+        if path.is_null() {
+            return real(dirfd, path, times, flags);
+        }
+        with_fallback(path, neg_int, |p| real(dirfd, p, times, flags))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn truncate(path: *const c_char, len: libc::off_t) -> c_int {
+    unsafe {
+        let Some(real) = real_write().truncate else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, len))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setxattr(
+    path: *const c_char,
+    name: *const c_char,
+    value: *const c_void,
+    size: usize,
+    flags: c_int,
+) -> c_int {
+    unsafe {
+        let Some(real) = real_write().setxattr else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, name, value, size, flags))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lsetxattr(
+    path: *const c_char,
+    name: *const c_char,
+    value: *const c_void,
+    size: usize,
+    flags: c_int,
+) -> c_int {
+    unsafe {
+        let Some(real) = real_write().lsetxattr else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, name, value, size, flags))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn removexattr(path: *const c_char, name: *const c_char) -> c_int {
+    unsafe {
+        let Some(real) = real_write().removexattr else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, name))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lremovexattr(path: *const c_char, name: *const c_char) -> c_int {
+    unsafe {
+        let Some(real) = real_write().lremovexattr else {
+            return missing(-1);
+        };
+        with_fallback(path, neg_int, |p| real(p, name))
+    }
+}
+
+/// `f(addr)`; on ENOENT for a unix socket path again with its remapped path (`/var/run/dbus/...`).
+unsafe fn unix_sock(
+    addr: *const libc::sockaddr,
+    len: libc::socklen_t,
+    create: bool,
+    f: impl Fn(*const libc::sockaddr, libc::socklen_t) -> c_int,
+) -> c_int {
+    unsafe {
+        let r = f(addr, len);
+        if r == 0
+            || errno() != libc::ENOENT
+            || addr.is_null()
+            || (*addr).sa_family != libc::AF_UNIX as libc::sa_family_t
+        {
+            return r;
+        }
+        let first = errno();
+        let un = &*(addr as *const libc::sockaddr_un);
+        if un.sun_path[0] != b'/' as c_char {
+            return r;
+        }
+        let path = un.sun_path.as_ptr();
+        let found = if create {
+            create_target(path)
+        } else {
+            existing_target(path)
+        };
+        let Some(c) = found else {
+            set_errno(first);
+            return r;
+        };
+        let bytes = c.as_bytes_with_nul();
+        if bytes.len() > un.sun_path.len() {
+            set_errno(first);
+            return r;
+        }
+        let mut moved: libc::sockaddr_un = std::mem::zeroed();
+        moved.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (d, s) in moved.sun_path.iter_mut().zip(bytes) {
+            *d = *s as c_char;
+        }
+        let mlen = (std::mem::size_of::<libc::sa_family_t>() + bytes.len()) as libc::socklen_t;
+        f(
+            &moved as *const libc::sockaddr_un as *const libc::sockaddr,
+            mlen,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bind(
+    fd: c_int,
+    addr: *const libc::sockaddr,
+    len: libc::socklen_t,
+) -> c_int {
+    unsafe {
+        let Some(real) = real_write().bind else {
+            return missing(-1);
+        };
+        unix_sock(addr, len, true, |a, l| real(fd, a, l))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn connect(
+    fd: c_int,
+    addr: *const libc::sockaddr,
+    len: libc::socklen_t,
+) -> c_int {
+    unsafe {
+        let Some(real) = real_write().connect else {
+            return missing(-1);
+        };
+        unix_sock(addr, len, false, |a, l| real(fd, a, l))
     }
 }
