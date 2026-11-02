@@ -14,7 +14,7 @@
     unlink; unlinkat; rmdir;
     mkdir; mkdirat; mkfifo; mknod; rename; renameat; renameat2; symlink; symlinkat; link;
     chmod; fchmodat; chown; lchown; fchownat; utimensat; truncate;
-    setxattr; lsetxattr; removexattr; lremovexattr; bind; connect;
+    setxattr; lsetxattr; removexattr; lremovexattr; bind; connect; setmntent;
     getpwnam; getpwnam_r; getpwuid; getpwuid_r; getgrnam; getgrnam_r; getgrgid; getgrgid_r;
     sys_resolver_candidates;
   local: *;

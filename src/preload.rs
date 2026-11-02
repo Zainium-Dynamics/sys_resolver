@@ -2041,6 +2041,7 @@ struct RealWrite {
     lremovexattr: Option<RemovexattrFn>,
     bind: Option<SockFn>,
     connect: Option<SockFn>,
+    setmntent: Option<FopenFn>,
 }
 
 fn real_write() -> &'static RealWrite {
@@ -2070,6 +2071,7 @@ fn real_write() -> &'static RealWrite {
             lremovexattr: next(c"lremovexattr"),
             bind: next(c"bind"),
             connect: next(c"connect"),
+            setmntent: next(c"setmntent"),
         }
     })
 }
@@ -2468,5 +2470,17 @@ pub unsafe extern "C" fn connect(
             return missing(-1);
         };
         unix_sock(addr, len, false, |a, l| real(fd, a, l))
+    }
+}
+
+/// musl's setmntent opens the file with its own internal fopen, which no hook sees: GLib built
+/// without libmount reads /etc/mtab this way, and with no mounts found it shows no mounted drives.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setmntent(path: *const c_char, mode: *const c_char) -> *mut libc::FILE {
+    unsafe {
+        let Some(real) = real_write().setmntent else {
+            return missing(std::ptr::null_mut());
+        };
+        with_fallback(path, null_ptr, |p| real(p, mode))
     }
 }
