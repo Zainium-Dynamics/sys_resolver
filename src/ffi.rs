@@ -48,9 +48,7 @@ mod tests {
 
     #[test]
     fn ffi_round_trip_matches_the_pure_rust_candidates() {
-        unsafe {
-            std::env::set_var(crate::remap::ZAIROOT_ENV, "/run/media/alizain/ZAINIUM_DRIVE/zairoot");
-        }
+        crate::test_fixture::use_for_env();
 
         let path = CString::new("/usr/bin/env").unwrap();
         let mut buf = vec![0u8; 4096];
@@ -77,9 +75,7 @@ mod tests {
 
     #[test]
     fn ffi_reports_buffer_too_small_instead_of_writing_garbage() {
-        unsafe {
-            std::env::set_var(crate::remap::ZAIROOT_ENV, "/run/media/alizain/ZAINIUM_DRIVE/zairoot");
-        }
+        crate::test_fixture::use_for_env();
         let path = CString::new("/usr/bin/env").unwrap();
         let mut buf = vec![0u8; 1];
         let n = unsafe {
@@ -90,10 +86,8 @@ mod tests {
 
     #[test]
     fn ffi_returns_zero_for_out_of_scope_path() {
-        unsafe {
-            std::env::set_var(crate::remap::ZAIROOT_ENV, "/run/media/alizain/ZAINIUM_DRIVE/zairoot");
-        }
-        let path = CString::new("/home/alizain/whatever").unwrap();
+        crate::test_fixture::use_for_env();
+        let path = CString::new("/home/someone/whatever").unwrap();
         let mut buf = vec![0u8; 4096];
         let n = unsafe {
             sys_resolver_candidates(path.as_ptr(), buf.as_mut_ptr() as *mut c_char, buf.len())

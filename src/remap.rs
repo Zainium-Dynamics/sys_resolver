@@ -118,51 +118,37 @@ pub fn resolve(path: &Path, roots: &Roots) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn live_roots() -> Roots {
-        Roots::under(Path::new("/run/media/alizain/ZAINIUM_DRIVE/zairoot"))
-    }
+    use crate::test_fixture::{root, roots as fixture_roots};
 
     #[test]
     fn resolves_env_under_syshub_bin() {
-        let got = resolve(Path::new("/usr/bin/env"), &live_roots()).unwrap();
-        assert_eq!(
-            got,
-            Path::new("/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/syshub/bin/env")
-        );
+        let got = resolve(Path::new("/usr/bin/env"), &fixture_roots()).unwrap();
+        assert_eq!(got, root().join("overlayer/syshub/bin/env"));
     }
 
     #[test]
     fn resolves_bare_bin_path_without_usr_prefix() {
-        let got = resolve(Path::new("/bin/env"), &live_roots()).unwrap();
-        assert_eq!(
-            got,
-            Path::new("/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/syshub/bin/env")
-        );
+        let got = resolve(Path::new("/bin/env"), &fixture_roots()).unwrap();
+        assert_eq!(got, root().join("overlayer/syshub/bin/env"));
     }
 
     #[test]
     fn resolves_header_that_only_exists_under_zexlib_union() {
-        let got = resolve(Path::new("/usr/include/dav1d/dav1d.h"), &live_roots()).unwrap();
-        assert_eq!(
-            got,
-            Path::new(
-                "/run/media/alizain/ZAINIUM_DRIVE/zairoot/overlayer/zexlib/union/include/dav1d/dav1d.h"
-            )
-        );
+        let got = resolve(Path::new("/usr/include/dav1d/dav1d.h"), &fixture_roots()).unwrap();
+        assert_eq!(got, root().join("overlayer/zexlib/union/include/dav1d/dav1d.h"));
     }
 
     #[test]
     fn scope_guard_refuses_unrelated_prefixes() {
-        let roots = live_roots();
-        for p in ["/home/alizain/whatever", "/proc/self", "/tmp/x", "/root/x"] {
+        let roots = fixture_roots();
+        for p in ["/home/someone/whatever", "/proc/self", "/tmp/x", "/root/x"] {
             assert_eq!(resolve(Path::new(p), &roots), None, "should refuse {p}");
         }
     }
 
     #[test]
     fn resolves_var_and_etc_under_syshub() {
-        let roots = live_roots();
+        let roots = fixture_roots();
         assert_eq!(
             resolve(Path::new("/var"), &roots),
             Some(roots.syshub.join("var"))
@@ -177,7 +163,7 @@ mod tests {
     fn never_invents_a_path_that_does_not_exist() {
         let got = resolve(
             Path::new("/usr/bin/this-binary-does-not-exist-anywhere"),
-            &live_roots(),
+            &fixture_roots(),
         );
         assert_eq!(got, None);
     }
@@ -196,7 +182,7 @@ mod tests {
 
     #[test]
     fn candidates_are_pure_and_ordered_no_io() {
-        let roots = live_roots();
+        let roots = fixture_roots();
         let got = candidates(Path::new("/usr/bin/definitely-not-real"), &roots);
         assert_eq!(
             got,
@@ -227,14 +213,14 @@ mod tests {
 
     #[test]
     fn resolves_real_firmware_dir_under_drivers() {
-        let roots = live_roots();
+        let roots = fixture_roots();
         let got = resolve(Path::new("/lib/firmware"), &roots).unwrap();
         assert_eq!(got, roots.syshub.join("drivers/hardware/firmwares"));
     }
 
     #[test]
     fn resolves_boot_dir_under_zaisys_kernel() {
-        let roots = live_roots();
+        let roots = fixture_roots();
         let got = resolve(Path::new("/boot"), &roots).unwrap();
         assert_eq!(got, roots.zaisys.join("kernel"));
     }

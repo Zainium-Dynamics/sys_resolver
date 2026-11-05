@@ -97,13 +97,9 @@ pub fn full_audit(roots: &Roots) -> (Vec<AuditResult>, std::time::Duration) {
 mod tests {
     use super::*;
 
-    fn live_roots() -> Roots {
-        Roots::under(Path::new("/run/media/alizain/ZAINIUM_DRIVE/zairoot"))
-    }
-
     #[test]
     fn every_real_file_is_reachable_or_a_known_dangling_symlink() {
-        let roots = live_roots();
+        let roots = crate::test_fixture::roots();
         let (results, elapsed) = full_audit(&roots);
 
         let mut total_checked = 0usize;
@@ -122,8 +118,8 @@ mod tests {
         }
 
         assert!(
-            total_checked > 30_000,
-            "expected tens of thousands of real files, only found {total_checked}"
+            total_checked > crate::test_fixture::FILES.len(),
+            "the audit must see every file and the dangling link, found {total_checked}"
         );
         assert!(
             genuine_gaps.is_empty(),

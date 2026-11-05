@@ -229,18 +229,9 @@ mod tests {
     use super::*;
     use std::ffi::CStr;
 
-    fn set_fixture_root() {
-        unsafe {
-            std::env::set_var(
-                crate::remap::ZAIROOT_ENV,
-                "/run/media/alizain/ZAINIUM_DRIVE/zairoot",
-            );
-        }
-    }
-
     #[test]
     fn parses_real_fixture_passwd_and_group() {
-        set_fixture_root();
+        crate::test_fixture::use_for_env();
         let root = lookup_passwd_by_name("root").expect("root must exist in fixture");
         assert_eq!(root.uid, 0);
         assert_eq!(root.gid, 0);
