@@ -1,0 +1,79 @@
+sys_resolver
+============
+
+Zainium OS has no /usr, /bin or /lib at the root: the system lives under
+/overlayer. Most software still asks for the classic paths. sys_resolver
+makes those paths work, with no mount, no symlink, no kernel patch and no
+change to the programs themselves.
+
+It is a library preloaded into programs, libsys_resolver.so, and a small
+tool, sys-resolver. A path that exists is never touched. When a lookup
+fails with ENOENT, the path is tried again under the real roots, in order:
+
+    /overlayer/syshub
+    /overlayer/syshub/x86_64-zainium-linux-musl
+    /overlayer/zexlib/union
+    /overlayer/zaisys
+
+So /usr/bin/env opens /overlayer/syshub/bin/env. Only paths starting with
+bin, sbin, lib, usr, opt, var, etc or boot are resolved; /home and /tmp
+are left alone.
+
+What it does
+------------
+
+  - resolves paths in file calls: open, stat, access, opendir, readlink,
+    realpath, dlopen and the rest, for musl and glibc programs
+  - starts scripts whose #! interpreter is not at the path they name
+    (#!/bin/sh, #!/usr/bin/env python3), however they are run
+  - starts prebuilt programs whose loader is missing, such as
+    /lib64/ld-linux-x86-64.so.2, through this system's copy of it
+  - refuses to delete files of the base, for programs other than zex. This
+    is a safety net against a stray rm -rf, not a security boundary
+
+The library has no libc of its own. Its calls bind to the libc of the
+program it is loaded into, so a glibc program never gets musl loaded next
+to glibc.
+
+The tool
+--------
+
+    sys-resolver resolve <path>    what a classic path resolves to now
+    sys-resolver doctor            audit the resolver against the system
+    sys-resolver get               which libc builds use, and why
+
+Building for glibc
+------------------
+
+Plain gcc builds for musl. To build for glibc (the glibc and
+glibc-toolchain packages):
+
+    eval "$(sys-resolver env glibc)"     for one shell or a ZEXBUILD
+    elevate sys-resolver set glibc       for the whole system
+
+"env musl" and "set musl" go back. ZAINIUM_LIBC=musl|glibc overrides the
+setting for one environment. Only building changes: every program keeps
+running with the libc it was linked against.
+
+Not covered
+-----------
+
+  - lookups libc makes internally, such as musl's timezone search
+  - static and setuid programs: the loader preloads nothing into them
+  - the loader of a program started by a static or setuid program
+
+Building
+--------
+
+    cargo test --release
+    ./build-so.sh
+
+build-so.sh writes target/libsys_resolver.so. Use
+CC=x86_64-zainium-linux-musl-gcc on Zainium OS. The library is installed
+as /overlayer/syshub/lib/libsys_resolver.so and preloaded through
+LD_PRELOAD in the system environment.
+
+License
+-------
+
+GPL-3.0-only.
