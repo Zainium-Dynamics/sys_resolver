@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use sys_resolver::audit;
 use sys_resolver::remap::{self, Roots};
+use sys_resolver::setuid::{self, Verdict};
 use sys_resolver::toolchain::{self, Libc};
 
 /// sys_resolver — dynamic FHS-path resolution logic for ZainiumOS.
@@ -222,7 +223,60 @@ fn cmd_doctor(roots: &Roots) {
         println!("  every real file is reachable through a legacy FHS-shaped alias.");
     }
 
+    println!();
+    cmd_doctor_setuid(roots);
+
     if probe_misses > 0 || total_gaps > 0 {
         std::process::exit(1);
+    }
+}
+
+/// Enumerate setuid/setgid binaries and flag the ones that would fail start-up
+/// resolution under AT_SECURE, where LD_PRELOAD (and this resolver) is dropped.
+/// These are the known gap the libc-level fallback is meant to close, so they
+/// are reported but do not change the exit code.
+fn cmd_doctor_setuid(roots: &Roots) {
+    println!("== setuid/setgid binaries (AT_SECURE: resolver is NOT loaded here) ==");
+    let findings = setuid::audit(roots);
+    if findings.is_empty() {
+        println!("  none found under the base roots.");
+        return;
+    }
+
+    let failing: Vec<_> = findings.iter().filter(|f| f.verdict.is_failing()).collect();
+    for f in &findings {
+        let bits = match (f.setuid, f.setgid) {
+            (true, true) => "setuid+setgid",
+            (true, false) => "setuid",
+            (false, true) => "setgid",
+            _ => "",
+        };
+        match &f.verdict {
+            Verdict::Ok => println!("  ok      {} ({bits})", f.path.display()),
+            Verdict::NotAnElf => println!("  --      {} ({bits}, not an ELF)", f.path.display()),
+            Verdict::InterpMissing { interp } => println!(
+                "  FAIL    {} ({bits}) — won't start: interpreter {interp} is not at that literal path",
+                f.path.display()
+            ),
+            Verdict::LibrariesAtRisk { detail } => println!(
+                "  FAIL    {} ({bits}) — libraries may not load: {detail}",
+                f.path.display()
+            ),
+            Verdict::StaticSetuid => println!(
+                "  FAIL    {} ({bits}) — static binary: the libc-level fallback cannot reach it (replant / build dynamic)",
+                f.path.display()
+            ),
+        }
+    }
+    println!(
+        "  {} setuid/setgid binaries, {} would fail classic-path start-up under AT_SECURE.",
+        findings.len(),
+        failing.len()
+    );
+    if !failing.is_empty() {
+        println!(
+            "  (known gap — the fix is the libc-level path fallback, AT_SECURE-restricted to the\n\
+             sealed base; see docs/setuid-paths-plan.md. Not counted in the exit status yet.)"
+        );
     }
 }
